@@ -1,6 +1,6 @@
 # t4a-gpu-backend
 
-Independent GPU runtimes and kernels for tensor4all.
+Independent GPU runtimes for tensor4all.
 
 This repository is being developed separately from tenferro so that execution, memory ownership, transfers and kernel interfaces can be validated before a consumer changes its backend.
 
@@ -20,7 +20,7 @@ The CUDA runtime provides:
 - asynchronous lifetime, completion and retirement management;
 - CUDA module loading, compilation and kernel launch interfaces.
 
-The foundational runtime does not depend on tenferro Tensor, graph, CPU-provider or AD crates, or on CubeCL/CubeK. Tensor semantics, graph placement and differentiation stay in consumers. Reusable kernels and vendor adapters can be developed here as later work without moving those consumer semantics into the runtime.
+The foundational runtime does not depend on tenferro Tensor, graph, CPU-provider or AD crates, or on CubeCL/CubeK. Tensor semantics, graph placement and differentiation stay in consumers. Reusable native CUDA kernels live in the separate [t4a-cuda-kernels repository](https://github.com/tensor4all/t4a-cuda-kernels), with its [migration design](https://github.com/tensor4all/t4a-cuda-kernels/blob/main/docs/design/cubecl-kernel-port.md). That kernel crate does not depend on t4a-cuda-runtime; consumers can combine either project with their own CUDA infrastructure. Vendor adapters can be developed separately without moving Tensor semantics into the runtime.
 
 HIP/ROCm, Metal and Intel GPU implementations are future directions. Each can use its native execution model. Shared numerical specifications and tests should grow from concrete implementations; a universal runtime abstraction or kernel language is not a prerequisite.
 
