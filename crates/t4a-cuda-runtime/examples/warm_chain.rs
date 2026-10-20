@@ -92,10 +92,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("runtime warm chain");
     println!("  cold compile: {:?}", cold_compile);
     println!(
-        "  {} launches, {} completion events (amortised {:.3} per launch), {} pending records",
+        "  {} requested launches; window deltas: {} events, {} epochs reclaimed, {} host waits, {} pending records",
         iterations,
-        after.retirement.events_recorded,
-        after.retirement.events_recorded as f64 / iterations as f64,
+        after.retirement.events_recorded - before.retirement.events_recorded,
+        after.retirement.reclaimed_epochs - before.retirement.reclaimed_epochs,
+        after.retirement.host_waits - before.retirement.host_waits,
         after.pending_records
     );
     println!(

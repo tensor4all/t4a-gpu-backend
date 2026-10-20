@@ -165,7 +165,9 @@ Decisions taken while implementing, with reasons:
   A second Codex iteration then fixed: both D2H paths now use raw driver pointers (no reference over
   uninitialised staging); confirmed witnesses release their upstream history; module-cache and bind accounting
   include the full retained artifact/pending budget; `synchronize` counts as a host wait; and the two-GPU test
-  no longer masks the chain with a caller wait.
+  no longer masks the chain with a caller wait. A third iteration fixed module reservation through the
+  admission path, complete cache payload accounting (source, source id, options, architecture), NVRTC success
+  counted at the compiler call rather than at extraction, and warm-chain reporting as matched-window deltas.
 
   Still **not implemented** (recorded rather than claimed): counters for physical launches, allocations,
   zero-fills and cross-runtime event recordings; the one-GPU acceptance rows for owned-pinned upload, source

@@ -154,7 +154,13 @@ impl Artifact {
             .iter()
             .map(|(name, body)| name.len() + body.len())
             .sum();
-        self.image.len() + self.request.source.len() + headers
+        let options: usize = self.request.options.iter().map(String::len).sum();
+        self.image.len()
+            + self.request.source.len()
+            + self.request.source_id.len()
+            + self.request.arch.as_ref().map(String::len).unwrap_or(0)
+            + headers
+            + options
     }
 
     /// Raw PTX or CUBIN bytes.
@@ -294,6 +300,9 @@ pub(crate) fn compile_counted(
         };
         return Err(Error::Compile { detail });
     }
+    // The compiler call itself succeeded; extraction failures below must not
+    // turn that into "no successful compilation".
+    *successes += 1;
     let image = match request.output {
         OutputKind::Ptx => {
             // SAFETY: the program compiled successfully.
@@ -305,7 +314,6 @@ pub(crate) fn compile_counted(
         }
         OutputKind::Cubin => cubin_bytes(program)?,
     };
-    *successes += 1;
     Ok(Artifact {
         key: request.key(),
         request: request.clone(),
