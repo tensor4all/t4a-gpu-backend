@@ -108,9 +108,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         after.pending_records, before.pending_records
     );
     println!(
-        "  artifact cache: {} hit(s) / {} miss(es), module loads {}",
+        "  artifact cache: {} hit(s) / {} miss(es); NVRTC {} attempt(s) / {} success(es); module loads {}",
         runtime.artifact_cache_hits(),
         runtime.artifact_cache_misses(),
+        runtime.compile_attempts(),
+        runtime.compile_successes(),
         runtime.module_loads()
     );
 

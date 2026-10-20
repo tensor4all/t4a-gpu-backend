@@ -270,6 +270,16 @@ impl Runtime {
         self.artifacts.misses()
     }
 
+    /// Actual NVRTC compilation attempts made for this runtime.
+    pub fn compile_attempts(&self) -> u64 {
+        self.artifacts.compile_attempts()
+    }
+
+    /// Actual NVRTC compilations that succeeded for this runtime.
+    pub fn compile_successes(&self) -> u64 {
+        self.artifacts.compile_successes()
+    }
+
     /// Number of module loads performed by this runtime.
     pub fn module_loads(&self) -> u64 {
         self.modules.loads()

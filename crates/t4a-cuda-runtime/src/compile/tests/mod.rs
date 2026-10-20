@@ -89,10 +89,16 @@ fn cache_counts_real_compile_attempts() {
     assert_eq!(cache.misses(), 1);
     assert_eq!(cache.hits(), 1);
     assert_eq!(cache.len(), 1);
+    // Warm use performs no NVRTC work; the counters must show exactly one
+    // attempt and one success so far.
+    assert_eq!(cache.compile_attempts(), 1);
+    assert_eq!(cache.compile_successes(), 1);
 
     let mut changed = request.clone();
     changed.options.push("--use_fast_math".into());
     cache.get_or_compile(&changed).unwrap();
     assert_eq!(cache.misses(), 2);
     assert_eq!(cache.len(), 2);
+    assert_eq!(cache.compile_attempts(), 2);
+    assert_eq!(cache.compile_successes(), 2);
 }

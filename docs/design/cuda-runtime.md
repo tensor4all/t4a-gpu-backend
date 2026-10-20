@@ -151,7 +151,9 @@ Decisions taken while implementing, with reasons:
   `Config::force_staged_route`; and new tests cover foreign function/argument rejection, `UnknownEntryPoint`,
   a synchronous launch failure, a real driver call inside `with_raw`, CUBIN bind+launch, the staged route's
   chunk ring, no completion event across plain launches, and dropping a runtime's buffer inside another
-  runtime's raw scope (shared primary context).
+  runtime's raw scope (shared primary context). NVRTC attempt/success counters are now recorded at the
+  compile-call boundary (`ArtifactCache::compile_attempts/successes`, exposed on `Runtime`), independently of
+  cache hits/misses; only a *paired* latency comparison still needs a quiet host.
 
 Validation performed on this branch (A100 80GB PCIe, driver 580.126.09, CUDA 12.6 toolkit):
 

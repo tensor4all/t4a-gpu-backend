@@ -347,6 +347,8 @@ pub struct ArtifactCache {
     max_bytes: usize,
     hits: u64,
     misses: u64,
+    attempts: u64,
+    successes: u64,
 }
 
 impl ArtifactCache {
@@ -359,6 +361,8 @@ impl ArtifactCache {
             max_bytes,
             hits: 0,
             misses: 0,
+            attempts: 0,
+            successes: 0,
         }
     }
 
@@ -374,7 +378,11 @@ impl ArtifactCache {
             return Ok(std::sync::Arc::clone(&self.entries[index]));
         }
         self.misses += 1;
-        let artifact = std::sync::Arc::new(compile(request)?);
+        // Actual NVRTC call-boundary counters, independent of cache statistics.
+        self.attempts += 1;
+        let compiled = compile(request)?;
+        self.successes += 1;
+        let artifact = std::sync::Arc::new(compiled);
         self.insert(std::sync::Arc::clone(&artifact));
         Ok(artifact)
     }
@@ -411,6 +419,16 @@ impl ArtifactCache {
     /// Estimated payload bytes retained.
     pub fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    /// Actual NVRTC compilation attempts made by this cache.
+    pub fn compile_attempts(&self) -> u64 {
+        self.attempts
+    }
+
+    /// Actual NVRTC compilations that succeeded.
+    pub fn compile_successes(&self) -> u64 {
+        self.successes
     }
 
     /// Cache hits since creation.
