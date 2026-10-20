@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+    branches: [main, design/cuda-runtime]
+  pull_request:
+
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: format
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy -j 16 --workspace --all-targets --all-features -- -D warnings
+      - name: tests without CUDA
+        run: cargo test -j 16 --workspace
+      - name: documentation
+        run: cargo doc -j 16 --workspace --no-deps
+
+# The `gpu-tests` targets need a real CUDA device and are run on a self-hosted
+# GPU host (see docs/design/cuda-runtime.md); a missing device fails, never skips.

@@ -1,0 +1,53 @@
+[package]
+name = "t4a-cuda-runtime"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Standalone CUDA execution runtime for tensor4all experiments"
+
+[features]
+default = []
+# Selects tests that require real CUDA hardware. An invoked hardware test on a
+# host without a usable device fails; it never silently passes.
+gpu-tests = []
+
+[dependencies]
+cudarc = { version = "=0.19.8", default-features = false, features = [
+    "std",
+    "driver",
+    "nvrtc",
+    "dynamic-loading",
+    "cuda-12080",
+] }
+thiserror = "2"
+
+# Only for the fault-injection integration test, which must provoke a real
+# asynchronous driver failure through the runtime's own stream.
+[dev-dependencies]
+cudarc = { version = "=0.19.8", default-features = false, features = [
+    "std",
+    "driver",
+    "dynamic-loading",
+    "cuda-12080",
+] }
+
+[[test]]
+name = "host_contract"
+path = "tests/host_contract.rs"
+
+[[test]]
+name = "gpu_single"
+path = "tests/gpu_single.rs"
+required-features = ["gpu-tests"]
+
+[[test]]
+name = "gpu_multi"
+path = "tests/gpu_multi.rs"
+required-features = ["gpu-tests"]
+
+[[test]]
+name = "gpu_faults"
+path = "tests/gpu_faults.rs"
+required-features = ["gpu-tests"]

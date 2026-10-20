@@ -6,9 +6,26 @@ This repository is being developed separately from tenferro so that execution, m
 
 ## Status
 
-Design and initial repository setup. No runtime or numerical kernel implementation is present yet.
+The first milestone is **[t4a-cuda-runtime](https://github.com/tensor4all/t4a-gpu-backend/issues/1)**: a standalone
+Rust CUDA execution foundation built on cudarc and CUDA APIs. Its design issue is the source of truth for scope,
+ownership contracts and acceptance criteria; the [detailed design](docs/design/cuda-runtime.md) records the
+mechanisms as implemented.
 
-The first milestone is **[t4a-cuda-runtime](https://github.com/tensor4all/t4a-gpu-backend/issues/1)**: a standalone Rust CUDA execution foundation built on cudarc and CUDA APIs. Its design issue is the source of truth for scope, ownership contracts and acceptance criteria. A [draft CUDA detailed design](docs/design/cuda-runtime.md) proposes the mechanisms for review; it does not claim implementation or approval.
+`crates/t4a-cuda-runtime/` currently implements the standalone runtime: one real stream and explicit memory pool
+per runtime, stream-ordered device allocation, bounded pinned staging, explicit ordered transfers, cross-runtime
+copies, completion/witness observation, NVRTC artifacts, per-runtime modules and a raw consumer seam.
+
+Validation status:
+
+- `cargo fmt`, `cargo clippy -D warnings`, `cargo test` (CPU-only), doctests and `cargo doc` pass.
+- The `gpu-tests` suite passes on one physical A100 80GB (driver 580.126.09, CUDA 12.6 toolkit, NVRTC from it).
+- The two-physical-GPU lane (`tests/gpu_multi.rs`) is not run on a one-GPU host; it fails with an explicit
+  message rather than passing silently.
+- `examples/warm_chain.rs` reports warm-chain counters and an indicative direct-cudarc comparison (not a paired
+  benchmark).
+
+Adoption by tenferro remains a separate, later maintainer decision: no backend switch, no kernel-catalog port and
+no CUDA Graph/NCCL/P2P work is part of this milestone.
 
 ## Boundaries
 

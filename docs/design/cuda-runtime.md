@@ -1,6 +1,6 @@
 # CUDA runtime — detailed design (revised draft)
 
-**Status:** proposal for [t4a-gpu-backend#1](https://github.com/tensor4all/t4a-gpu-backend/issues/1), including the [first audit](https://github.com/tensor4all/t4a-gpu-backend/issues/1#issuecomment-6285354854) and the [re-audit of revision 5e658b4](https://github.com/tensor4all/t4a-gpu-backend/issues/1#issuecomment-6285819487). No implementation, acceptance test result, adoption decision or new CUDA version floor is claimed. Public names and limits below remain subject to approval.
+**Status:** implemented on `design/cuda-runtime` for [t4a-gpu-backend#1](https://github.com/tensor4all/t4a-gpu-backend/issues/1), after the [first audit](https://github.com/tensor4all/t4a-gpu-backend/issues/1#issuecomment-6285354854) and the [re-audit of revision 5e658b4](https://github.com/tensor4all/t4a-gpu-backend/issues/1#issuecomment-6285819487). The API is still a draft for maintainer approval, the two-physical-GPU lane is not run on this one-GPU host, and no adoption decision or new CUDA version floor is claimed.
 
 ## 1. Boundary and dependencies
 
@@ -91,6 +91,69 @@ Production files contain production logic, with `#[cfg(test)] mod tests;` pointi
 | Required performance; optional vendor consumer | A consumer-owned vendor handle between two small runtime kernels with no runtime vendor dependency. Warm chain reports submissions, physical runtime-managed launches, event and host-wait counts and correctness. Cold prepare compiles once per key; layout-value changes reuse artifact, while headers/options/compiler/target changes invalidate it; each runtime loads its own module, warm execution calls NVRTC zero times. Compare small allocation/launch/transfer to direct cudarc with matched context/pool/stream, recording hardware, driver, toolkit and latency separately from throughput. |
 
 Implement on one working branch; one PR **only after** the standalone runtime, docs and local gates are complete. Sequence: (1) minimal low-level context/stream/pool with safe restoration, typed capability/loading errors and the narrow post-enqueue `cfg(test)` seam; (2) stream-ordered buffer Drop, bounded pinned staging, epoch retirement and lifecycle/auto-trait tests; (3) two-runtime copies plus **early timeout-bounded cross-context witness/foreign-wait experiment on two GPUs**, then full physical multi-GPU numerical/error tests; (4) artifact/binding/raw consumer seam, caches and warm metrics; (5) full independent GPU correctness/performance evidence. No tenferro switch, release, P2P optimization, CUDA Graph, NCCL, ROCm/WebGPU runtime, universal executor or extra crates in this issue. Adoption needs a later maintainer decision.
+
+## 9. Implementation record (this branch)
+
+Source layout follows §7: `context.rs`, `runtime.rs`, `memory.rs`, `transfer.rs`, `retirement.rs`,
+`compile.rs`, `kernel.rs`, `raw.rs`, `error.rs`, `lib.rs`. Production files contain no inline test blocks;
+each has `#[cfg(test)] mod tests;` into `src/<module>/tests/mod.rs`, and `tests/` holds the public-contract
+suites `host_contract.rs`, `gpu_single.rs`, `gpu_multi.rs`, `gpu_faults.rs`.
+
+Decisions taken while implementing, with reasons:
+
+- **Device buffers stay lease-free.** `Buffer::drop` only enqueues `cuMemFreeAsync` on the owning stream. A
+  pointer whose foreign read became uncertain is moved into a domain quarantine list and is freed once at
+  final domain teardown after one successful stream synchronisation; on a broken domain it is leaked.
+- **Epochs are per staging chunk and per sealed keepalive batch.** Kernel submissions record no event; module
+  keepalives accumulate in the open epoch, which is sealed at half the record budget or at an explicit
+  observation boundary. This keeps warm launches free of `cuEventRecord`.
+- **Pressure never blocks on a foreign-dependent event.** Pressure queries foreign witnesses under their own
+  context, and only then queries the local event. There is no `cuEventSynchronize` on foreign events and no
+  library-level timeout knob; a stalled device stalls the caller, which is the documented honesty boundary.
+- **Same-device copy** records `src_ready`, waits on it from the destination, copies, records `dst_done`, and
+  makes the source stream wait on `dst_done`. The `src_ready` event is retained as a witness (it is a
+  same-context event, so observation is cheap) so it cannot be destroyed while a destination wait still
+  references it. Staged copies give each chunk its own source event and destination epoch.
+- **Uninitialised buffers are usable as kernel outputs** through `Arg::DevicePtrUninit`; the only conversion
+  is the `unsafe UninitBuffer::assume_init`.
+- **Compilation defaults to PTX**; `OutputKind::Cubin` requires an explicit `arch` and is produced through the
+  NVRTC CUBIN entry points. Keys hash all inputs and are verified by full request equality on lookup, so a hash
+  collision cannot reuse a different image.
+- **Public surface added beyond the sketch**: `Runtime::observe`, `stream_id`, `alloc_pinned`,
+  `artifact_cache_hits/misses`, `module_loads`, `RawScope::device_ptr_range`.
+- **Admission is one serialised sequence.** A per-runtime operation lock spans reserve → enqueue → commit, so a
+  concurrent observer cannot seal an epoch mid-admission, and two observers cannot settle different epochs.
+  Capacity (bytes *and* records) is reserved before the DMA is enqueued; a commit that fails after the enqueue
+  hands the staging chunk back and the caller abandons it (leaks) instead of freeing storage a queued DMA may
+  still write.
+- **Failed teardown retains, not frees.** If the final drain cannot be proved, the domain leaks its retirement
+  state and a context retain instead of destroying the pool/stream and dropping pending chunks.
+- **Compile identity is complete.** Cache lookups verify the full artifact (request, observed compiler version,
+  image); NVRTC symbols are probed; a program guard destroys the program on every path; option strings are
+  validated before cudarc sees them.
+- **Failure injection is test-only.** A `cfg(test)` point after the enqueue and before the event record/back-wait
+  is exercised by a module-local unit test; production builds have no seam.
+- **Post-implementation review corrections** (independent GPT review): serialised admission, reserve-before-
+  enqueue, quarantine on every post-enqueue failure, leak-on-failed-drain, complete artifact identity, cache
+  zero-capacity handling, NVRTC symbol probe/guard, frontier pruning under pressure, transitive upstream
+  witnesses, and retained `done`/`ready` events.
+
+Validation performed on this branch (A100 80GB PCIe, driver 580.126.09, CUDA 12.6 toolkit):
+
+- `cargo fmt --check`, `cargo clippy -j 16 --workspace --all-targets --all-features -- -D warnings`,
+  `cargo test -j 16 --workspace`, doctests and `cargo doc` pass.
+- `cargo test -j 16 -p t4a-cuda-runtime --features gpu-tests --lib --test host_contract --test gpu_single
+  --test gpu_faults -- --test-threads=1` passes: 35 unit tests (including two-runtime independence, alignment
+  measurement, cross-thread last drop, context restore after success and unwind, raw-scope poisoning) plus 6
+  single-GPU contract tests and the isolated illegal-address fault test.
+- `tests/gpu_multi.rs` compiles and is **not run**: this host has one physical GPU; the test fails explicitly
+  rather than passing silently when executed on such a host.
+- `examples/warm_chain.rs` (release, `taskset -c 0`) reports 200 warm submissions with zero per-launch events,
+  about 1.96 µs per launch, and an indicative unpaired direct-cudarc baseline. These are shared-host numbers,
+  not a paired performance result.
+
+Not implemented, deliberately: peer-to-peer fast path, persisted artifacts, CUDA Graphs, NCCL, vendor-adapter
+test, tenferro adoption. The kernel emitter/catalog stays in `t4a-cuda-kernels`.
 
 ## References
 
