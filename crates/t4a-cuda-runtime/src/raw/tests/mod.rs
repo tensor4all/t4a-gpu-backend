@@ -40,3 +40,16 @@ fn panicking_raw_closure_poisons_later_admission() {
     assert!(result.is_err());
     assert!(matches!(runtime.observe(), Err(Error::Broken { .. })));
 }
+
+#[cfg(feature = "gpu-tests")]
+#[test]
+fn unregistered_buffers_are_refused_inside_a_raw_scope() {
+    let mut runtime = crate::Runtime::open(0, crate::Config::default()).unwrap();
+    let outside = runtime.alloc_zeroed(16, 256).unwrap();
+    // SAFETY: the closure only inspects pointers and issues no CUDA call.
+    let outcome = unsafe { runtime.with_raw(Vec::new(), |raw| raw.device_ptr(&outside)) };
+    match outcome {
+        Ok(Err(Error::InvalidArgument { .. })) => {}
+        other => panic!("expected an invalid-argument refusal, got {other:?}"),
+    }
+}

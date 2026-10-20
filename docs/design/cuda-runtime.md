@@ -153,14 +153,17 @@ Decisions taken while implementing, with reasons:
   chunk ring, no completion event across plain launches, and dropping a runtime's buffer inside another
   runtime's raw scope (shared primary context). NVRTC attempt/success counters are now recorded at the
   compile-call boundary (`ArtifactCache::compile_attempts/successes`, exposed on `Runtime`), independently of
-  cache hits/misses; only a *paired* latency comparison still needs a quiet host.
+  cache hits/misses; only a *paired* latency comparison still needs a quiet host. Also closed: raw scopes
+  refuse unregistered buffers, upload/download chunk commits have a test-only fault point, the module cache is
+  keyed per artifact (entry points share one load) with a capacity-eviction test, `Stats` exposes `pool_id`,
+  and blocking observation loops are counted (`host_waits`).
 
 Validation performed on this branch (A100 80GB PCIe, driver 580.126.09, CUDA 12.6 toolkit):
 
 - `cargo fmt --check`, `cargo clippy -j 16 --workspace --all-targets --all-features -- -D warnings`,
   `cargo test -j 16 --workspace`, doctests and `cargo doc` pass.
 - `cargo test -j 16 -p t4a-cuda-runtime --features gpu-tests --lib --test host_contract --test gpu_single
-  --test gpu_faults -- --test-threads=1` passes: 34 unit, 14 single-GPU contract and 1 fault test (including two-runtime independence, alignment
+  --test gpu_faults -- --test-threads=1` passes: 37 unit, 18 single-GPU contract and 1 fault test (including two-runtime independence, alignment
   measurement, cross-thread last drop, context restore after success and unwind, raw-scope poisoning) plus 6
   single-GPU contract tests and the isolated illegal-address fault test.
 - `tests/gpu_multi.rs` compiles and is **not run**: this host has one physical GPU; the test fails explicitly

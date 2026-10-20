@@ -54,6 +54,8 @@ pub struct RetirementStats {
     pub pressure_polls: u64,
     /// Completion events recorded on the stream.
     pub events_recorded: u64,
+    /// Blocking observation loops entered by the caller.
+    pub host_waits: u64,
     /// Pinned staging chunks allocated from CUDA.
     pub chunk_allocs: u64,
     /// Staging chunks leaked because completion could not be proved.
@@ -69,6 +71,8 @@ pub(crate) enum FaultPoint {
     BeforeEventRecord,
     /// Before the source stream is ordered behind the copy.
     BeforeSourceBackWait,
+    /// After a host-transfer chunk was enqueued but before its epoch is committed.
+    AfterChunkEnqueue,
 }
 
 #[cfg(test)]
@@ -434,6 +438,11 @@ impl Retirement {
     pub(crate) fn release_module_bytes(&self, bytes: usize) {
         let mut state = self.lock();
         state.module_bytes = state.module_bytes.saturating_sub(bytes);
+    }
+
+    /// Count one caller-driven blocking observation loop.
+    pub(crate) fn note_host_wait(&self) {
+        self.lock().stats.host_waits += 1;
     }
 
     /// Record a failure that makes further admission unsafe.

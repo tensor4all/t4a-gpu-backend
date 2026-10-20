@@ -107,6 +107,8 @@ pub struct Stats {
     pub ordinal: usize,
     /// Allocation-domain identity; distinct for every opened runtime.
     pub domain_id: u64,
+    /// Identity of this runtime's explicit memory pool.
+    pub pool_id: u64,
     /// Live device allocations.
     pub live_allocations: usize,
     /// Live device bytes.
@@ -342,6 +344,7 @@ impl Domain {
         Stats {
             ordinal: self.ordinal(),
             domain_id: self.id,
+            pool_id: self.pool as usize as u64,
             live_allocations: state.live_allocations,
             live_bytes: state.live_bytes,
             pool_used_bytes: used,

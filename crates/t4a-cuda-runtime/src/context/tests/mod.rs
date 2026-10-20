@@ -53,3 +53,17 @@ fn pool_capability_is_probed() {
     assert!(supports_memory_pool(0).expect("probe must succeed"));
     assert!(device_count().expect("count must succeed") >= 1);
 }
+
+#[cfg(feature = "gpu-tests")]
+#[test]
+fn final_holder_drop_does_not_leave_a_stale_current_context() {
+    let holder = ContextHolder::open(0).expect("device 0 must be usable");
+    let context = holder.raw();
+    drop(holder);
+    let current = drv::ctx::get_current().expect("cuCtxGetCurrent must succeed");
+    assert_ne!(
+        current,
+        Some(context),
+        "a released handle must not stay current"
+    );
+}

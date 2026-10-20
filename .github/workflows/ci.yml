@@ -20,6 +20,8 @@ jobs:
       - name: tests without CUDA
         run: cargo test -j 16 --workspace
       - name: documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
         run: cargo doc -j 16 --workspace --no-deps
 
 # The `gpu-tests` targets need a real CUDA device and are run on a self-hosted

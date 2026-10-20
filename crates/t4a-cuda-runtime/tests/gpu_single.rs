@@ -350,3 +350,85 @@ fn dropping_a_runtime_buffer_inside_another_runtimes_raw_scope_keeps_its_context
     let mut pending = b.download(&kept).unwrap();
     assert_eq!(pending.wait().unwrap(), vec![2u8; 16]);
 }
+
+#[test]
+fn runtimes_expose_distinct_pool_identities() {
+    let a = open(0);
+    let b = open(0);
+    assert_ne!(a.stats().pool_id, b.stats().pool_id);
+    assert_ne!(a.stats().domain_id, b.stats().domain_id);
+}
+
+#[test]
+fn module_cache_evicts_by_capacity_and_clears() {
+    let config = Config {
+        module_cache_entries: 1,
+        ..Config::default()
+    };
+    let mut runtime = Runtime::open(0, config).unwrap();
+    let first = {
+        let request = CompileRequest::new("scale2-a", SCALE2);
+        let artifact = runtime.compile(&request).unwrap();
+        runtime.bind(&artifact, "scale2").unwrap()
+    };
+    // A second artifact must evict the first cached entry.
+    let second_source = format!("{SCALE2}\nextern \"C\" __global__ void unused() {{}}\n");
+    let second = {
+        let request = CompileRequest::new("scale2-b", second_source);
+        let artifact = runtime.compile(&request).unwrap();
+        runtime.bind(&artifact, "scale2").unwrap()
+    };
+    assert_eq!(runtime.stats().module_entries, 1);
+    assert_eq!(runtime.module_loads(), 2);
+    runtime.clear_modules();
+    assert_eq!(runtime.stats().module_entries, 0);
+    // Bound functions keep their module alive and remain usable after eviction.
+    let input = runtime.upload(&[1u8, 2]).unwrap();
+    for function in [&first, &second] {
+        let out = launch_scale2(&mut runtime, function, &input);
+        let mut pending = runtime.download(&out).unwrap();
+        assert_eq!(pending.wait().unwrap(), vec![2u8, 4]);
+    }
+}
+
+#[test]
+fn entry_points_of_one_artifact_share_a_single_module_load() {
+    let source = format!("{SCALE2}\nextern \"C\" __global__ void scale2_b(const unsigned char* i, unsigned char* o, unsigned long long n) {{ scale2(i, o, n); }}\n");
+    let mut runtime = open(0);
+    let artifact = runtime
+        .compile(&CompileRequest::new("two-entries", source))
+        .unwrap();
+    let first = runtime.bind(&artifact, "scale2").unwrap();
+    let second = runtime.bind(&artifact, "scale2_b").unwrap();
+    assert_eq!(runtime.module_loads(), 1);
+    let input = runtime.upload(&[3u8, 4]).unwrap();
+    for function in [&first, &second] {
+        let out = launch_scale2(&mut runtime, function, &input);
+        let mut pending = runtime.download(&out).unwrap();
+        assert_eq!(pending.wait().unwrap(), vec![6u8, 8]);
+    }
+}
+
+#[test]
+fn empty_buffers_are_rejected_as_kernel_arguments() {
+    let mut runtime = open(0);
+    let function = bind_scale2(&mut runtime);
+    let empty = runtime.upload(&[]).unwrap();
+    let out = runtime.alloc_uninit(4, 256).unwrap();
+    // SAFETY: rejected before the driver is called.
+    let outcome = unsafe {
+        runtime.launch(
+            &function,
+            LaunchConfig::new(1, 1),
+            &[
+                Arg::DevicePtr(&empty),
+                Arg::DevicePtrUninit(&out),
+                Arg::U64(0),
+            ],
+        )
+    };
+    assert!(matches!(
+        outcome,
+        Err(t4a_cuda_runtime::Error::InvalidArgument { .. })
+    ));
+}

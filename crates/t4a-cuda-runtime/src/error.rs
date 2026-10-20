@@ -118,18 +118,17 @@ impl Error {
 
     /// Wrap a driver error, classifying out-of-memory separately.
     pub(crate) fn from_driver(context: &'static str, source: DriverError) -> Error {
-        if source.0 == sys::CUresult::CUDA_ERROR_OUT_OF_MEMORY {
-            Error::OutOfMemory { bytes: 0 }
-        } else {
-            Error::Driver { context, source }
-        }
+        // Keep the failing entry point; only allocation call sites know the size
+        // and reclassify out-of-memory through `from_alloc`.
+        Error::Driver { context, source }
     }
 
     /// Wrap a driver error that was caused by an allocation of `bytes`.
     pub(crate) fn from_alloc(bytes: usize, context: &'static str, source: DriverError) -> Error {
-        match Error::from_driver(context, source) {
-            Error::OutOfMemory { .. } => Error::OutOfMemory { bytes },
-            other => other,
+        if source.0 == sys::CUresult::CUDA_ERROR_OUT_OF_MEMORY {
+            Error::OutOfMemory { bytes }
+        } else {
+            Error::Driver { context, source }
         }
     }
 

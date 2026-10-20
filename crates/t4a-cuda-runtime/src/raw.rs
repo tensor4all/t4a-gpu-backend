@@ -35,6 +35,7 @@ pub enum RawResource<'a> {
 pub struct RawScope<'a> {
     domain: &'a Arc<Domain>,
     stream: sys::CUstream,
+    registered: &'a [usize],
     _not_send: PhantomData<*const ()>,
 }
 
@@ -50,11 +51,23 @@ impl RawScope<'_> {
     }
 
     /// Device pointer of a buffer registered with this scope.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ForeignDomain`] for a buffer of another runtime and
+    /// [`Error::InvalidArgument`] for a same-runtime buffer that was not listed
+    /// in `resources`.
     pub fn device_ptr(&self, buffer: &Buffer) -> Result<u64> {
         if !Arc::ptr_eq(buffer.alloc().domain(), self.domain) {
             return Err(Error::ForeignDomain);
         }
-        Ok(buffer.device_ptr())
+        let pointer = buffer.device_ptr() as usize;
+        if !self.registered.contains(&pointer) {
+            return Err(Error::invalid(
+                "buffer was not registered with this raw scope",
+            ));
+        }
+        Ok(pointer as u64)
     }
 
     /// Device pointer of a checked `offset..offset + len` span of a registered
@@ -94,12 +107,14 @@ pub(crate) unsafe fn with_raw<R>(
         return Err(Error::Broken { detail });
     }
     let mut keepalives: Vec<(Box<dyn Any + Send>, usize)> = Vec::new();
+    let mut registered: Vec<usize> = Vec::new();
     for resource in resources {
         match resource {
             RawResource::Buffer(buffer) => {
                 if !Arc::ptr_eq(buffer.alloc().domain(), domain) {
                     return Err(Error::ForeignDomain);
                 }
+                registered.push(buffer.device_ptr() as usize);
             }
             RawResource::Keepalive { value, bytes } => keepalives.push((value, bytes)),
         }
@@ -125,6 +140,7 @@ pub(crate) unsafe fn with_raw<R>(
         let raw = RawScope {
             domain,
             stream,
+            registered: &registered,
             _not_send: PhantomData,
         };
         // SAFETY: the caller upholds the kernel ABI, pointer bounds and foreign

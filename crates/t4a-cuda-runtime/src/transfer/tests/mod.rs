@@ -88,5 +88,25 @@ fn injected_post_enqueue_failure_quarantines_the_source() {
     ));
     // The destination owns a copy it never published; observation reports the
     // failure instead of claiming readiness.
-    assert!(destination.observe().is_err() || destination.stats().pending_records == 0);
+    // The destination must not report the unpublished copy as ready.
+    match destination.observe() {
+        Err(_) => {}
+        Ok(()) => assert_eq!(destination.stats().pending_records, 0),
+    }
+}
+
+#[cfg(feature = "gpu-tests")]
+#[test]
+fn injected_chunk_commit_failure_poisons_the_owner() {
+    use crate::retirement::{arm_fault, disarm_fault, FaultPoint};
+
+    let mut runtime = crate::Runtime::open(0, crate::Config::default()).unwrap();
+    arm_fault(FaultPoint::AfterChunkEnqueue);
+    let upload = runtime.upload(&[1u8; 64]);
+    disarm_fault();
+    assert!(upload.is_err(), "the injected fault must be reported");
+    assert!(matches!(
+        runtime.upload(&[1u8; 64]),
+        Err(crate::Error::Broken { .. })
+    ));
 }

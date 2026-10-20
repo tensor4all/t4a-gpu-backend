@@ -157,7 +157,6 @@ pub(crate) struct ModuleCache {
 
 struct ModuleEntry {
     artifact: Arc<Artifact>,
-    entry: String,
     module: Arc<ModuleInner>,
     bytes: usize,
 }
@@ -173,10 +172,10 @@ impl ModuleCache {
         }
     }
 
-    pub(crate) fn lookup(&mut self, artifact: &Artifact, entry: &str) -> Option<Arc<ModuleInner>> {
+    pub(crate) fn lookup(&mut self, artifact: &Artifact) -> Option<Arc<ModuleInner>> {
         self.entries
             .iter()
-            .find(|candidate| candidate.entry == entry && *candidate.artifact == *artifact)
+            .find(|candidate| *candidate.artifact == *artifact)
             .map(|candidate| Arc::clone(&candidate.module))
     }
 
@@ -185,12 +184,7 @@ impl ModuleCache {
     /// The cache owns the module, so a bound function can be re-bound without
     /// reloading; eviction does not unload a module still held by a
     /// `BoundFunction` or a queued launch.
-    pub(crate) fn insert(
-        &mut self,
-        artifact: &Arc<Artifact>,
-        entry: &str,
-        module: &Arc<ModuleInner>,
-    ) {
+    pub(crate) fn insert(&mut self, artifact: &Arc<Artifact>, module: &Arc<ModuleInner>) {
         // Count the real load even when the entry is not retained.
         self.loads += 1;
         if self.max_entries == 0 || module.bytes() > self.max_bytes {
@@ -206,7 +200,6 @@ impl ModuleCache {
         self.bytes += module.bytes();
         self.entries.push(ModuleEntry {
             artifact: Arc::clone(artifact),
-            entry: entry.to_string(),
             module: Arc::clone(module),
             bytes: module.bytes(),
         });
@@ -241,7 +234,7 @@ pub(crate) fn bind(
     if entry.is_empty() {
         return Err(Error::invalid("entry point name must not be empty"));
     }
-    let module = match cache.lookup(artifact, entry) {
+    let module = match cache.lookup(artifact) {
         Some(module) => module,
         None => {
             let _scope = domain.scope()?;
@@ -264,7 +257,7 @@ pub(crate) fn bind(
                 domain: Arc::downgrade(domain),
             });
             domain.retirement().retain_module_bytes(image_bytes);
-            cache.insert(artifact, entry, &inner);
+            cache.insert(artifact, &inner);
             inner
         }
     };
@@ -321,11 +314,17 @@ pub(crate) unsafe fn launch(
                 if !Arc::ptr_eq(buffer.alloc().domain(), domain) {
                     return Err(Error::ForeignDomain);
                 }
+                if buffer.is_empty() {
+                    return Err(Error::invalid("an empty buffer has no device address"));
+                }
                 buffer.device_ptr()
             }
             Arg::DevicePtrUninit(buffer) => {
                 if !Arc::ptr_eq(buffer.alloc().domain(), domain) {
                     return Err(Error::ForeignDomain);
+                }
+                if buffer.is_empty() {
+                    return Err(Error::invalid("an empty buffer has no device address"));
                 }
                 buffer.device_ptr()
             }

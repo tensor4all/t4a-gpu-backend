@@ -1,6 +1,7 @@
-//! Public contract tests that must run without initialising CUDA.
+//! Public contract tests that can run without creating a CUDA context.
 //!
-//! On a host without a driver, opening a runtime reports a typed unavailable
+//! Probe paths may load the driver but never create a context. On a host
+//! without a driver, opening a runtime reports a typed unavailable
 //! error. On a host with a driver, an unknown ordinal reports a typed invalid
 //! device error. Neither case may panic, and neither is reported as a hardware
 //! test success.

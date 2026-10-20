@@ -136,6 +136,11 @@ fn stage_upload(domain: &Arc<Domain>, buffer: &Buffer, data: &[u8]) -> Result<()
                 admission.abandon_chunk(chunk);
                 return Err(Error::from_driver("cuMemcpyHtoDAsync", error));
             }
+            if let Err(error) = fault_point(FaultPoint::AfterChunkEnqueue) {
+                admission.abandon_chunk(chunk);
+                domain.mark_broken(error.to_string());
+                return Err(error);
+            }
             if let Err((error, chunk)) = admission.commit_chunk(stream, chunk, None, Vec::new()) {
                 // The DMA may still run, so the storage is abandoned (leaked)
                 // rather than freed.
@@ -192,6 +197,11 @@ pub(crate) fn upload_owned(domain: &Arc<Domain>, mut pinned: PinnedHostBuffer) -
             admission.abandon_chunk(chunk);
             return Err(Error::from_driver("cuMemcpyHtoDAsync", error));
         }
+        if let Err(error) = fault_point(FaultPoint::AfterChunkEnqueue) {
+            admission.abandon_chunk(chunk);
+            domain.mark_broken(error.to_string());
+            return Err(error);
+        }
         if let Err((error, chunk)) = admission.commit_chunk(stream, chunk, None, Vec::new()) {
             admission.abandon_chunk(chunk);
             domain.mark_broken(error.to_string());
@@ -238,6 +248,11 @@ pub(crate) fn download(domain: &Arc<Domain>, buffer: &Buffer) -> Result<PendingD
             if let Err(error) = copied {
                 admission.abandon_chunk(chunk);
                 return Err(Error::from_driver("cuMemcpyDtoHAsync", error));
+            }
+            if let Err(error) = fault_point(FaultPoint::AfterChunkEnqueue) {
+                admission.abandon_chunk(chunk);
+                domain.mark_broken(error.to_string());
+                return Err(error);
             }
             let target = download_target(&slot, offset, len);
             if let Err((error, chunk)) =
@@ -301,6 +316,7 @@ impl PendingDownload {
 
     /// Observe until the download completes.
     pub fn wait(&mut self) -> Result<Vec<u8>> {
+        self.domain.retirement().note_host_wait();
         loop {
             if let Some(bytes) = self.poll()? {
                 return Ok(bytes);
@@ -363,6 +379,7 @@ impl Completion {
 
     /// Observe until the copy completes.
     pub fn wait(&mut self) -> Result<()> {
+        self.domain.retirement().note_host_wait();
         loop {
             if self.poll()?.is_some() {
                 return Ok(());

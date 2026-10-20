@@ -90,8 +90,8 @@ fn last_drop_on_another_thread_releases_in_stream_order() {
 #[test]
 fn misaligned_requests_are_rejected_without_leaking() {
     let domain = Domain::create(ContextHolder::open(0).unwrap(), &Config::default()).unwrap();
-    // 64 KiB is documented as unsupported above; the request must fail before any
-    // allocation is exposed and the domain must stay usable.
+    // A non-power-of-two alignment is rejected before any CUDA allocation; above
+    // 64 KiB the runtime also refuses rather than promising it (see Config docs).
     let _domain = domain;
     let result = crate::runtime::Runtime::open(0, Config::default());
     let mut runtime = result.expect("runtime must open");
