@@ -133,6 +133,67 @@ Decisions taken while implementing, with reasons:
   validated before cudarc sees them.
 - **Failure injection is test-only.** A `cfg(test)` point after the enqueue and before the event record/back-wait
   is exercised by a module-local unit test; production builds have no seam.
+- **Independent reviews** (three at design time, five on the implementation) drove these invariants into the
+  code: serialised admission, reserve-before-enqueue, quarantine and leak-on-unprovable-completion, portable
+  pinned staging, a module cache that retains and evicts by full payload, raw-pointer D2H writes, readiness gated
+  on confirmed upstream witnesses, budget-aware chunk/upload routing, and complete artifact/counter accounting.
+  Deliberately **not** implemented: physical-launch/allocation/zero-fill/cross-runtime-event counters, and the
+  one-GPU acceptance rows for owned-pinned upload, source mutation after upload, immediate source overwrite and
+  the source-back-wait injection point.
+
+## 8. Acceptance evidence and implementation order
+
+| Lane | Required evidence, not yet performed |
+| --- | --- |
+| CPU-only | Build/fmt/clippy/rustdoc/doctests without initializing CUDA; missing-driver/symbol/capability typed errors; checked span/overflow, trait assertions, pure epoch/quota and transfer-order state tests. Only CPU-selectable unit/integration targets run; hardware tests are **not run**, never silently passed. |
+| One real GPU | Two runtime instances on one ordinal expose different real streams, domain IDs and pool IDs; reject each other's buffers/functions and preserve independent pool/cache stats. Kernel A → real A→B copy → kernel B → readback matches CPU without caller waits. Immediate source overwrite/drop, destination reuse, raw kernel/vendor call, module eviction, bounded staging, cache warm/cold counts, pending handle Drop/forget, panic and last-drop after runtime teardown. Restore the caller context after success/error/unwind **and final destructor**. |
+| Fault injection | One narrow `cfg(test)` wrapper at the owning Driver API call boundary can fail *after* copy enqueue / *before* event record and at source back-wait; module-local unit tests and their child unit-test processes exercise this seam, not integration tests. Assert broken owner and no early reuse. In isolated subprocesses with deadlines, exercise real illegal-address/sticky context errors **early in the copy implementation**: source event queried under its own context from C, source failure after partial multi-chunk enqueue, transitive A→B→C after original-handle drop, a **confirmed** A→B frontier followed by an unrelated later A failure on a different GPU (must not retroactively fail B), pressure waits never synchronizing a foreign event or foreign-dependent local event, and no claimed recovery on reopen. Use no broad mock framework. |
+| Two physical GPUs | Real staged numerical chain, opposing transfers, source-drop order and multi-chunk bounded staging with two distinct GPU IDs; a consumed pinned upload larger than the pending limit reuses bounded staging rather than retaining the whole input through GPU completion; three independent runtimes across the two GPUs exercise transitive failure and verify that source events are queried only with their own context active. On a one-GPU host explicitly report **not run**. |
+| Required performance; optional vendor consumer | A consumer-owned vendor handle between two small runtime kernels with no runtime vendor dependency. Warm chain reports submissions, physical runtime-managed launches, event and host-wait counts and correctness. Cold prepare compiles once per key; layout-value changes reuse artifact, while headers/options/compiler/target changes invalidate it; each runtime loads its own module, warm execution calls NVRTC zero times. Compare small allocation/launch/transfer to direct cudarc with matched context/pool/stream, recording hardware, driver, toolkit and latency separately from throughput. |
+
+Implement on one working branch; one PR **only after** the standalone runtime, docs and local gates are complete. Sequence: (1) minimal low-level context/stream/pool with safe restoration, typed capability/loading errors and the narrow post-enqueue `cfg(test)` seam; (2) stream-ordered buffer Drop, bounded pinned staging, epoch retirement and lifecycle/auto-trait tests; (3) two-runtime copies plus **early timeout-bounded cross-context witness/foreign-wait experiment on two GPUs**, then full physical multi-GPU numerical/error tests; (4) artifact/binding/raw consumer seam, caches and warm metrics; (5) full independent GPU correctness/performance evidence. No tenferro switch, release, P2P optimization, CUDA Graph, NCCL, ROCm/WebGPU runtime, universal executor or extra crates in this issue. Adoption needs a later maintainer decision.
+
+## 9. Implementation record (this branch)
+
+Source layout follows §7: `context.rs`, `runtime.rs`, `memory.rs`, `transfer.rs`, `retirement.rs`,
+`compile.rs`, `kernel.rs`, `raw.rs`, `error.rs`, `lib.rs`. Production files contain no inline test blocks;
+each has `#[cfg(test)] mod tests;` into `src/<module>/tests/mod.rs`, and `tests/` holds the public-contract
+suites `host_contract.rs`, `gpu_single.rs`, `gpu_multi.rs`, `gpu_faults.rs`.
+
+Decisions taken while implementing, with reasons:
+
+- **Device buffers stay lease-free.** `Buffer::drop` only enqueues `cuMemFreeAsync` on the owning stream. A
+  pointer whose foreign read became uncertain is moved into a domain quarantine list and is freed once at
+  final domain teardown after one successful stream synchronisation; on a broken domain it is leaked.
+- **Epochs are per staging chunk and per sealed keepalive batch.** Kernel submissions record no event; module
+  keepalives accumulate in the open epoch, which is sealed at half the record budget or at an explicit
+  observation boundary. This keeps warm launches free of `cuEventRecord`.
+- **Pressure never blocks on a foreign-dependent event.** Pressure queries foreign witnesses under their own
+  context, and only then queries the local event. There is no `cuEventSynchronize` on foreign events and no
+  library-level timeout knob; a stalled device stalls the caller, which is the documented honesty boundary.
+- **Same-device copy** records `src_ready`, waits on it from the destination, copies, records `dst_done`, and
+  makes the source stream wait on `dst_done`. The `src_ready` event is retained as a witness (it is a
+  same-context event, so observation is cheap) so it cannot be destroyed while a destination wait still
+  references it. Staged copies give each chunk its own source event and destination epoch.
+- **Uninitialised buffers are usable as kernel outputs** through `Arg::DevicePtrUninit`; the only conversion
+  is the `unsafe UninitBuffer::assume_init`.
+- **Compilation defaults to PTX**; `OutputKind::Cubin` requires an explicit `arch` and is produced through the
+  NVRTC CUBIN entry points. Keys hash all inputs and are verified by full request equality on lookup, so a hash
+  collision cannot reuse a different image.
+- **Public surface added beyond the sketch**: `Runtime::observe`, `stream_id`, `alloc_pinned`,
+  `artifact_cache_hits/misses`, `module_loads`, `RawScope::device_ptr_range`.
+- **Admission is one serialised sequence.** A per-runtime operation lock spans reserve → enqueue → commit, so a
+  concurrent observer cannot seal an epoch mid-admission, and two observers cannot settle different epochs.
+  Capacity (bytes *and* records) is reserved before the DMA is enqueued; a commit that fails after the enqueue
+  hands the staging chunk back and the caller abandons it (leaks) instead of freeing storage a queued DMA may
+  still write.
+- **Failed teardown retains, not frees.** If the final drain cannot be proved, the domain leaks its retirement
+  state and a context retain instead of destroying the pool/stream and dropping pending chunks.
+- **Compile identity is complete.** Cache lookups verify the full artifact (request, observed compiler version,
+  image); NVRTC symbols are probed; a program guard destroys the program on every path; option strings are
+  validated before cudarc sees them.
+- **Failure injection is test-only.** A `cfg(test)` point after the enqueue and before the event record/back-wait
+  is exercised by a module-local unit test; production builds have no seam.
 - **Post-implementation review corrections** (independent GPT review): serialised admission, reserve-before-
   enqueue, quarantine on every post-enqueue failure, leak-on-failed-drain, complete artifact identity, cache
   zero-capacity handling, NVRTC symbol probe/guard, frontier pruning under pressure, transitive upstream
