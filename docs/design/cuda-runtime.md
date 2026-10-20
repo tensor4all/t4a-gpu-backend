@@ -170,7 +170,8 @@ Decisions taken while implementing, with reasons:
   counted at the compiler call rather than at extraction, and warm-chain reporting as matched-window deltas. A
   fourth iteration made module-cache accounting use the full retained artifact payload, reserved module bytes
   through the admission lock, checked upstream witnesses before reporting a pending intermediate event, and
-  sized staging chunks to the budget left by live modules.
+  sized staging chunks to the budget left by live modules. A fifth iteration serialised witness observation,
+  reused only idle chunks that fit the headroom, and chose the owned-upload route against that headroom.
 
   Still **not implemented** (recorded rather than claimed): counters for physical launches, allocations,
   zero-fills and cross-runtime event recordings; the one-GPU acceptance rows for owned-pinned upload, source

@@ -171,7 +171,8 @@ pub(crate) fn upload_owned(domain: &Arc<Domain>, mut pinned: PinnedHostBuffer) -
     if pinned.is_empty() {
         return Ok(buffer);
     }
-    let fits = pinned.len() <= domain.retirement().pending_budget();
+    // Live modules already consume part of the budget; only the headroom counts.
+    let fits = pinned.len() <= domain.retirement().available_host_bytes();
     if !fits {
         stage_upload(domain, &buffer, pinned.as_slice())?;
         drop(pinned);

@@ -265,6 +265,8 @@ pub(crate) struct Witness {
     upstream: Mutex<Vec<Arc<Witness>>>,
     /// Terminal observation: `Some(None)` = confirmed, `Some(Some(msg))` = failed.
     terminal: Mutex<Option<Option<String>>>,
+    /// Serialises the whole check/query/update sequence.
+    query_lock: Mutex<()>,
 }
 
 // SAFETY: the event belongs to `ctx`; every query activates that context on the
@@ -290,6 +292,7 @@ impl Witness {
             label: label.into(),
             upstream: Mutex::new(upstream),
             terminal: Mutex::new(None),
+            query_lock: Mutex::new(()),
         })
     }
 
@@ -299,6 +302,10 @@ impl Witness {
     /// the source context cannot retroactively fail an already confirmed
     /// transfer, and a shared upstream is not re-queried.
     pub(crate) fn query(&self) -> Result<WitnessStatus> {
+        let _serialised = self
+            .query_lock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         {
             let terminal = self
                 .terminal
@@ -647,10 +654,15 @@ impl Retirement {
         holder: &Arc<ContextHolder>,
         want: usize,
     ) -> Result<PinnedChunk> {
-        let want = want.clamp(1, self.limits.max_chunk_bytes);
+        // Never pick a chunk that cannot fit beside live modules.
+        let available = self.available_host_bytes().max(1);
+        let want = want.clamp(1, self.limits.max_chunk_bytes.min(available));
         let idle = {
             let mut state = self.lock();
-            let index = state.idle.iter().position(|chunk| chunk.len() >= want);
+            let index = state
+                .idle
+                .iter()
+                .position(|chunk| chunk.len() >= want && chunk.len() <= available);
             let chunk = index.map(|index| state.idle.remove(index));
             if let Some(chunk) = &chunk {
                 state.idle_bytes = state.idle_bytes.saturating_sub(chunk.len());
@@ -824,8 +836,10 @@ impl Retirement {
         state.epochs.is_empty() && state.open.leases.is_empty() && state.frontiers.is_empty()
     }
 
-    pub(crate) fn pending_budget(&self) -> usize {
-        self.limits.pending_bytes
+    /// Host bytes still available beside live loaded modules.
+    pub(crate) fn available_host_bytes(&self) -> usize {
+        let state = self.lock();
+        self.limits.pending_bytes.saturating_sub(state.module_bytes)
     }
 
     pub(crate) fn pending_bytes_hint(&self) -> usize {
