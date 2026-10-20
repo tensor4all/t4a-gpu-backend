@@ -1,0 +1,263 @@
+# CUDA runtime — detailed design (revised draft)
+
+**Status:** implemented on `design/cuda-runtime` for [t4a-gpu-backend#1](https://github.com/tensor4all/t4a-gpu-backend/issues/1), after the [first audit](https://github.com/tensor4all/t4a-gpu-backend/issues/1#issuecomment-6285354854) and the [re-audit of revision 5e658b4](https://github.com/tensor4all/t4a-gpu-backend/issues/1#issuecomment-6285819487). The API is still a draft for maintainer approval, the two-physical-GPU lane is not run on this one-GPU host, and no adoption decision or new CUDA version floor is claimed.
+
+## 1. Boundary and dependencies
+
+The first workspace member is `crates/t4a-cuda-runtime` (`publish = false`). It owns CUDA context activation/restoration, one real non-default nonblocking stream per `Runtime`, one **explicit** `CUmemPool` per runtime, stable-address allocations, ordered transfers, owned pinned staging, completion, module loading and kernel launch. Two runtimes opened on one ordinal have different stream, pool and allocation-domain identities; they may share the CUDA primary context and its sticky errors. No worker/server thread or process-global runtime registry.
+
+Use cudarc 0.19's **low-level bindings**, not its execution/storage policy: propose pinning 0.19.8 with `version = "=0.19.8"`, `default-features = false` and only `std`, `driver`, `nvrtc`, `dynamic-loading`, `cuda-12080`. Driver calls use `driver::result/sys`, NVRTC its compiler bindings. Do not create a `CudaSlice`, use cudarc's safe launch builder or `CudaContext::new_stream`, change its context-wide `event_tracking` flag, or enable CUDA Runtime API/vendor features. This avoids a second event tracker without writing a new FFI generator or changing another holder's context policy. The baseline tenferro manifest requests cudarc `0.19` and CUDA 12.8 bindings; **binding version is not a driver support claim**. Probe required symbols/capabilities and report missing ones as typed errors; test actual driver/toolkit compatibility.
+
+`Runtime` retains/releases the primary context explicitly via the low-level bindings. Every CUDA operation and final destructor activates that context, saves the caller's current context and restores it on success, error and unwind; after releasing the last retain, do not restore a stale context pointer that was just released. CUDA handles, stream and pool remain pinned until their last allocation, module and pending work is safe to dispose of. A sticky context error is not cured by reopening the ordinal.
+
+This crate never depends on tenferro Tensor/graph/AD/CPU, CubeCL/CubeK, [t4a-cuda-kernels](https://github.com/tensor4all/t4a-cuda-kernels), or vendor libraries. Consumers own tensor meanings, generated kernel source, vendor handles/plans, graph placement and derivatives. Kernel-catalog ports and tenferro backend adoption are separate decisions ([tenferro-rs#2208](https://github.com/tensor4all/tenferro-rs/issues/2208)). No universal runtime trait, scheduler, kernel language or GPU-count policy.
+
+## 2. Ownership and safe surface
+
+| Object | Owner and permitted use |
+| --- | --- |
+| `Runtime` | Non-Clone execution owner. `&mut Runtime` admits numerical work on its single stream; `Runtime: Send + !Sync` is proposed, not a promise that two threads may submit concurrently. |
+| `Buffer`, `UninitBuffer` | Immutable domain/length/address metadata plus a ref-counted context/stream/pool holder. They carry **no authority to submit**. Propose `Send + Sync` for the handles: a concurrent last Drop uses only a short holder lock to enqueue a free, and safe submission still needs `&mut Runtime`. A consumer may not safely read `UninitBuffer`. `Buffer` is not `Clone`; consumers share one allocation via `Arc<Buffer>` (which requires `Buffer: Sync`), not by cloning allocation authority. |
+| `PendingDownload`, `Completion` | Observation handles; propose `Send + !Sync` to avoid concurrent observation semantics. `Completion::poll` queries without blocking; `Completion::wait` observes the same dependencies by repeated queries until ready/error, rather than blocking on a foreign CUDA event. Neither handle is required to keep work or buffers alive. Dropping/forgetting them cannot release resources still read/written by CUDA. |
+| `Artifact`, `BoundFunction` | An immutable shareable, context-free artifact is `Send + Sync`; a function holds its module and one runtime/domain identity (`Send + Sync` handle, but launch still needs the owning `&mut Runtime`). |
+| `RawScope` | `!Send + !Sync`, on the calling thread only. Its unsafe caller supplies kernel ABI and foreign-pointer invariants. |
+
+Public API shape, not final Rust signatures: `Runtime::open(ordinal, Config) -> Result`, `alloc_uninit(bytes, alignment)`, `alloc_zeroed(bytes, alignment)`, `upload(&[u8]) -> Buffer`, `upload_owned(PinnedHostBuffer) -> Buffer`, `download(&Buffer) -> PendingDownload`, `copy_between(&mut src, &mut dst, &Buffer) -> (Buffer, Completion, CopyRoute)`, `synchronize`, `close`, `stats`, `trim_pool`, `clear_modules`, `compile_artifact`, `bind_artifact`, `launch` and `unsafe with_raw(resources, closure)`. A same-runtime copy, if necessary, uses one `&mut Runtime`, not two aliased mutable borrows. Only owned device buffers from the correct allocation domain and bound functions from the same runtime may enter ordinary launches, even on the same ordinal. Host/device or inter-domain transfer is **never implicit**. Empty buffers use a non-dereferenceable representation; validate byte counts, offsets, alignment, overflow and ownership before zero-length/no-op paths or CUDA side effects. CUDA documents a minimum 256-byte alignment for driver/runtime allocations generally, but the cited text does not name `cuMemAllocFromPoolAsync` specifically; do not promise that guarantee for this pool allocator without checking it. Check returned base-pointer alignment (and each view offset) against the requested alignment, test the actual pool API on a GPU, and reject/free an insufficient allocation without exposing a misaligned buffer. A raw full-overwrite conversion from uninitialized to readable storage is `unsafe`; safe zero-fill/upload establishes initialized contents in stream order, with completion errors checked on readback.
+
+The exact auto-trait matrix is part of the API review: implementation must prove it with compile assertions and drop-on-another-thread tests, or narrow an entry before publication. No safe unchecked device pointer escapes; an external pointer/foreign stream remains the unsafe caller's responsibility.
+
+## 3. Fast path: stream order, not per-launch leases
+
+Allocate **explicitly** from the runtime's private pool via `cuMemAllocFromPoolAsync`; never set the device's default/current pool as the isolation mechanism. This crate never relocates a live allocation. For ordinary work the invariant is:
+
+```text
+on this runtime's one stream: allocate → all uses → cuMemFreeAsync
+```
+
+The last buffer Drop enqueues `cuMemFreeAsync` on its owning stream **after the last admitted use**, without a host wait or per-buffer completion event. The holder lock protects only short enqueue/state transitions; it is **not held across** a kernel launch, a user raw closure, a wait or a context teardown. An admitted raw scope temporarily keeps its registered buffer handles alive through closure exit so that dropping a caller handle inside the closure cannot queue a free between its launches. Once the scope ends, stream ordering protects work that was enqueued; it does not need to retain device buffers until GPU completion. Work on arbitrary foreign streams is outside the safe contract.
+
+A cross-runtime read adds the required source-stream dependency **before returning from admission** (§5). Only if an event/back-wait fails after work may have been enqueued do we exceptionally retain/quarantine the affected device allocation: never enqueue a source free ahead of an unfinished foreign read. A source buffer can otherwise be dropped immediately after a successful copy admission. The destination buffer is freed only on its destination stream, after its own copy/consumers.
+
+The admission/retirement queue and the ref-counted resource holder are distinct: queue records may pin the holder, but the holder does not own records that point back to itself. This avoids a teardown reference cycle. Keep normal launch submission free of unconditional `cuEventRecord`, host synchronization and retained device-buffer accounting. Retain **only** resources whose lifetime CUDA stream-ordered free does not itself cover: pinned staging, loaded modules during queued use/unload, consumer-supplied `Send` keepalives, necessary cross-context completion witnesses, and exceptional uncertain frees. A retired cache entry may be evicted immediately; a queued use pins the module until safe unload. Pool release threshold is a retention hint, **not** a hard VRAM limit. Stats distinguish live allocations, pool used/reserved, pending-retained host/module bytes, idle pinned bytes and cache bytes (these categories need not sum to VRAM; module bytes are logical image estimates, not driver VRAM).
+
+## 4. Bounded staging and completion epochs
+
+Each runtime owns a private pool of **portable pinned-host chunks**, including the chunks it lends to a cross-GPU copy; the **destination** runtime owns the staging for that copy. Initial proposed policy: up to 64 MiB *idle* pinned bytes per runtime, 8 MiB maximum chunk, and a separate configurable finite pending-retention limit for staging/modules/keepalives plus a finite record/witness count. Propose a 256 MiB pending-host/module budget, 1024 outstanding records/witnesses, 64 entries / 256 MiB estimated payload per artifact or module cache, and a 256 MiB pool release threshold. These are reviewable, configurable defaults, not measured optimal values; provide configure/trim/clear/stats. Idle pinned retention is not counted as pending but is still bounded. Count extra bytes genuinely held by unfinished work, **not** the size of existing caller-owned device inputs/outputs or a caller-owned result `Vec`. An oversized **indivisible** raw keepalive/submission fails before enqueue; large pageable transfers are divisible and must not fail just because the tensor exceeds the pending limit.
+
+`upload(&[u8])`: copy each caller slice into an owned pinned chunk **before** queuing its H2D. When all chunks are occupied, record/query or wait on the oldest chunk's DMA, reclaim it, and continue. Returning means no queued DMA can still read the caller's borrowed slice; the output buffer is usable in this runtime's stream order even if final DMA is pending. `upload_owned` may DMA directly from a consumed pinned allocation **only when the whole allocation fits** the pending limit. Otherwise reuse the `upload(&[u8])` chunked staging path: copy the entire owned input into bounded staging before returning and release the original pinned allocation; no queued DMA reads that original allocation. Charge the in-flight staging, not a fractional span of an oversized retained input. Pressure waits during chunk recycling are reported; there is no unconditional wait on every small upload.
+
+`download`: queued D2H reads the source on its stream into pinned chunks, **not** into a caller-mutable/uninitialized `Vec`. Completed chunks are copied into destination-owned `MaybeUninit<u8>` storage; a full-size result is exposed only after every chunk succeeds and is initialized. Large calls may wait to recycle fixed-size staging before `download` returns, leaving the tail to `PendingDownload::poll/wait`. The pending handle owns a synchronized result state; the runtime's independent retirement queue owns in-flight pinned chunks/events and holds only a **weak** reference to that state. On successful DMA completion, retirement copies a chunk into the live result state under its lock **before** recycling that chunk; if the observer was dropped, it discards the completed chunk instead. An unrelated admission does **no opportunistic download copying**. If its staging/record budget is exhausted, it retires as many completed chunks as needed to admit the new work; that exceptional pressure path may copy several chunks and must be counted/measured. A large `download` call and its `poll/wait` may also drain multiple chunks. Ordinary warm kernel admissions with no staging need do not inherit a host copy. `poll/wait` may drive the same retirement under the same lock; it returns the result only when every byte is initialized. Forgetting the handle leaks its result allocation (ordinary `mem::forget` behavior), but cannot pin DMA staging indefinitely. Dropping it cannot cause a later write to freed host memory. On an asynchronous error no partial result is published. Direct download into consumer-owned pinned output could avoid the extra host copy, but no second public download path is added without a consumer need and measured benefit. A consumed owned-pinned upload and a pending download have the same non-escape rule. A failure to prove completion quarantines in-use host memory instead of freeing it.
+
+**Epochs:** one stream's later completion subsumes earlier work. Ordinary kernel/zero-fill/allocation submissions do not record an event. Close an epoch (one event) when an in-flight host/module lease must be retired or its budget pressures, for explicit completion/download, or at a cross-runtime dependency boundary; several submissions may share its completion. Track leases in the current epoch *before* their first enqueue. If a module/host lease is dropped or cleared while work is pending, seal its epoch before retiring it; do not unload early. Reclaim on event completion. When staging/record pressure requires progress, **query** foreign source witnesses with their owning context active; never `cuEventSynchronize` a foreign event. Only after its foreign predecessors are confirmed successful may pressure **wait** on the destination's local DMA-completion event and recycle that staging. If a source witness is still pending, poll/yield for progress or return its error; never block on a local event that depends on an unresolved foreign wait. This pressure-only path can stall if CUDA never reports completion (not a liveness guarantee); isolate sticky-error behavior in timeout-bounded subprocesses. Small transfers with free chunks do not host-wait. A large multi-chunk transfer recycles its fixed-size ring using this protocol rather than rejecting a valid tensor for exceeding the pending budget. A single raw scope may enqueue several kernels but declares all external resources and their honest retained sizes **before** receiving the stream; it is one admission, not necessarily one event. No unbounded queue of metadata or pinned storage is allowed.
+
+## 5. Cross-runtime copies and error boundaries
+
+Borrow **both** runtimes mutably during admission, and validate/reserve destination storage and any required staging before the first enqueue. Acquire each holder's short lock separately; never hold a lock during a user raw callback or while acquiring the other's, so opposing transfers do not invert locks. Both endpoints independently retain their context/stream/pool holder for any pending resources.
+
+- **Same physical GPU, distinct runtime domains:** on source stream record `src_ready` after earlier producers; destination stream waits on `src_ready`, copies into a **new destination-pool allocation**, then records `dst_done`. Source stream waits on `dst_done` before admitting a later write/free; destination consumers naturally follow the copy on destination stream. This conservative whole-stream bracket is correct without allocation-wise sharing. It may delay the source behind unrelated work already queued on the destination before the copy; report/measure this head-of-line cost rather than hiding it.
+- **Distinct physical GPUs:** stage through portable pinned chunks (destination-owned). For each chunk enqueue D2H on the source stream, record `staged`, enqueue a destination-stream wait on this source event (`cuStreamWaitEvent` permits a different context/device), enqueue H2D, and record `dst_done`. Source's later writes/frees are already ordered after D2H on its own stream; destination consumers follow H2D on theirs. Retain a chunk and both context holders until **both** source success and destination H2D completion can be confirmed; destination completion alone does not prove source success. A→B→C exports unresolved source/upstream witnesses transitively so host observation of C checks A. A small transfer only enqueues GPU dependencies and does **not** host-wait. For a large transfer, reuse the bounded staging ring only after querying its source witness on the source context and confirming its destination-local completion; host waits occur **only** at ring pressure, not per chunk unconditionally. On failure after partial enqueue, the destination buffer remains uninitialized/unpublished; keep D2H targets/source holders when their completion cannot be proved, and retire already queued H2Ds by their own events. Use this functional route even without P2P; report `Staged` and pressure waits. P2P optimization is deferred.
+- **Failure during admission:** if a copy was queued but recording its event or inserting the source back-wait fails, prevent new writes on the affected runtime(s). Retain/quarantine any source allocation whose foreign read is not yet known to have completed; mark the runtime broken and preserve the original typed error. No retry after enqueue, and no result is reported as initialized/ready on a failed path.
+
+A CUDA event's error is not reliably attributable to that *one* operation: an async error can be sticky at the shared **context**. Host success observation confirms the destination's completion/current context health **and** every unresolved upstream producer witness, each queried with its **own** context activated and the prior context restored on every path. An exported source witness carries unresolved upstream witnesses too: A→B→C must not report C ready without A's success even if original handles/runtimes have dropped. Carry immutable witnesses only at transfer boundaries (not per kernel), bound outstanding records, and prune a confirmed-success producer frontier; a later unrelated failure on A is **not** retroactively a failure of an already confirmed cross-GPU transfer. Keep an observed dependency failure sticky. A destination event/wait alone is **not** error propagation. CUDA does not specify whether a foreign-context GPU wait proceeds or stalls after a source context becomes sticky; early timeout-bounded subprocess tests must measure this. Budget pressure never host-waits on an unresolved foreign-dependent event; an explicit caller `wait`/`synchronize` may wait indefinitely on faulty hardware, and in-process recovery is not promised.
+
+`poll`, host read, explicit `synchronize()` and `close()` report errors; no per-launch host checks. `Drop` best-effort drains, retains/quarantines work whose completion cannot be proved, and never blocks on normal hot-path buffer returns. Final holder destruction after runtime close synchronizes queued frees **once**, then releases pool/stream/context and restores the thread's saved context; a failed final free/sync quarantines the entire required holder rather than destroy a resource still in use. Last-drop cleanup works on a thread other than the opener.
+
+## 6. Raw CUDA, module/compile caches and loading errors
+
+`unsafe with_raw(&mut Runtime, resources, |raw| ...)` prevalidates domain/spans and reserves non-device resource bytes/record slots **before** exposing this exact stream. The caller-thread closure receives a `!Send` raw scope and can call consumer-owned vendor handles bound to that stream or launch arbitrary kernels; it must declare host/module keepalives before enqueue. The runtime is already mutably borrowed: consumers query workspace size and allocate tracked workspaces through the runtime **before** entering the closure; no safe runtime allocation occurs inside `with_raw`. A `Send + 'static` consumer wrapper can be retired by this runtime only if its destructor is safe on the retirement thread and with the selected context; the unsafe caller owns other external resources and all foreign streams. Context restore, panic poisoning and completion/resource retirement are performed by a guard outside caller-forgettable objects. Checked grid/block/shared-memory/argument descriptors do not prove arbitrary kernel ABI, bounds of foreign pointers or full overwrite; those remain unsafe.
+
+A consumer or [t4a-cuda-kernels](https://github.com/tensor4all/t4a-cuda-kernels) supplies source, headers and specialization/ABI identity. Compile during preparation to an immutable context-free PTX/CUBIN **artifact** with diagnostics; prefer a matching local-architecture CUBIN when its target is known to avoid repeated driver JIT on binding, and make PTX compatibility/JIT explicit when only PTX is available; if a runtime is available, bind there before run, otherwise bind the artifact explicitly to **each** runtime before numerical submission. An eager first use may compile before enqueue; provide explicit prewarm. Prepared plans contain artifacts/target requirements, not device function handles. A bound function retains its module and only runs on its owning runtime. At a fixed specialization, extents, strides, offsets and lengths remain runtime arguments; validated rank, axis maps and algorithm configuration may specialize. Host-known small-rank layout metadata is passed by value where possible. Warm run performs no source generation, NVRTC, full-source hash, graph clone or needless per-argument heap allocation.
+
+An artifact key includes source and included-header **contents**, full compiler options, target architecture, output kind, declared dtype/specialization and ABI/generator revision (or equivalent source identity), and observed NVRTC/toolchain version; equality is exact after hash lookup. A runtime has private bounded artifact/module caches, clear/configure/stats and independent module handles even on the same ordinal. If preparation precedes runtime creation, a caller/prepare-owned bounded artifact cache uses the **same** compile operation; no global cache. Module lookup also keys load options and runtime/context generation. Cache eviction does not unload a bound or queued function. Actual NVRTC attempts/successes, cache hits/misses and module loads are distinct counters; warm-run diagnostics additionally count runtime-managed launches, metadata/payload transfers, allocations/zero-fills, events and host waits. Direct raw/vendor launches bypass the runtime's launcher, so the consumer measures those separately rather than reporting an invented total. Persisted artifact storage and kernel-catalog/fusion migration are not in this milestone.
+
+cudarc 0.19.8's dynamic `sys` layer can panic if the driver/NVRTC library or a needed symbol is missing. Before calling wrappers, probe the driver (`is_culib_present`) and its required symbols via its exported loader; probe NVRTC **only on compile**. Convert missing library/symbol and unsupported capabilities into typed errors without a new loader dependency. A narrow unwind guard is confined to the initial loader boundary for a library disappearing between probe and resolution; it never swallows a consumer kernel panic. No silent CPU fallback, default-pool fallback, implicit data transfer or after-enqueue retry.
+
+## 7. Source/test layout and shared agent rules
+
+Follow the [Tensor4all shared agent rules](https://github.com/tensor4all/tensor4all-agent-rules/blob/main/rules/index.md), especially [repository file organization](https://github.com/tensor4all/tensor4all-agent-rules/blob/main/rules/common/repository.md#file-organization), [Rust unsafe/test organization](https://github.com/tensor4all/tensor4all-agent-rules/blob/main/rules/rust/index.md) and [docs/tests](https://github.com/tensor4all/tensor4all-agent-rules/blob/main/rules/common/docs-and-tests.md). Root `AGENTS.md` links their canonical location; do not copy or fork the policy. Issue #1 remains the scope and acceptance contract; this document details one candidate implementation. This is one crate, not several microcrates or a universal backend interface.
+
+Keep `src/lib.rs` a thin facade. Proposed **ownership** boundaries, not mandatory one-file-per-type scaffolding: `context.rs` (driver calls, scoped context activation and narrow test-only injection), `runtime.rs` (single stream and admission), `memory.rs` (explicit pool and buffers), `transfer.rs` (upload/download and cross-runtime copies), `retirement.rs` (pinned chunks, epochs and witnesses), `compile.rs` (NVRTC artifacts), `kernel.rs` (runtime-local modules and launch), and `raw.rs` (unsafe consumer seam). Merge adjacent files if a concern stays small; split only at an actual behavior/ownership boundary. About 1000 lines is a **soft review trigger**, never a hard per-file maximum; no `part1`/`part2` files or one-method modules. Keep FFI and unsafe blocks in backend leaf files with `// SAFETY:` at each block and focused boundary tests; runtime-facing API exports only the supported public items.
+
+Production files contain production logic, with `#[cfg(test)] mod tests;` pointing to module-local `src/<module>/tests/mod.rs` (split to further `tests/*.rs` by **concern** when useful). For example, pure epoch and witness accounting belongs with `retirement`, and deterministic post-enqueue fault injection with `transfer`/`retirement`. The `cfg(test)` seam is **not** visible to crate-root `tests/` integration builds: test it only from module-local unit tests, including a child invocation of the **unit-test binary** when a poisoned context needs process isolation. A single default-off test-selection feature such as `gpu-tests` may select hardware-only unit tests and integration targets; it does not put fault hooks into production or create a second fault-injection public API. Crate-root `tests/` holds **public-contract** integration tests by concern: CPU-only missing-driver/errors (`host_contract.rs`); physical single-GPU independence/transfer (`gpu_single.rs`); physical two-GPU staged copies and source-context event checks (`gpu_multi.rs`); and real sticky-error subprocess behavior (`gpu_faults.rs`). CI explicitly selects hardware targets only on matching hosts; an invoked test with insufficient hardware fails, never silently returns success. Apply the linked shared rules for coverage, asserting examples, typed error docs and validation; do not silently pass unavailable GPU tests.
+
+## 8. Acceptance evidence and implementation order
+
+| Lane | Required evidence, not yet performed |
+| --- | --- |
+| CPU-only | Build/fmt/clippy/rustdoc/doctests without initializing CUDA; missing-driver/symbol/capability typed errors; checked span/overflow, trait assertions, pure epoch/quota and transfer-order state tests. Only CPU-selectable unit/integration targets run; hardware tests are **not run**, never silently passed. |
+| One real GPU | Two runtime instances on one ordinal expose different real streams, domain IDs and pool IDs; reject each other's buffers/functions and preserve independent pool/cache stats. Kernel A → real A→B copy → kernel B → readback matches CPU without caller waits. Immediate source overwrite/drop, destination reuse, raw kernel/vendor call, module eviction, bounded staging, cache warm/cold counts, pending handle Drop/forget, panic and last-drop after runtime teardown. Restore the caller context after success/error/unwind **and final destructor**. |
+| Fault injection | One narrow `cfg(test)` wrapper at the owning Driver API call boundary can fail *after* copy enqueue / *before* event record and at source back-wait; module-local unit tests and their child unit-test processes exercise this seam, not integration tests. Assert broken owner and no early reuse. In isolated subprocesses with deadlines, exercise real illegal-address/sticky context errors **early in the copy implementation**: source event queried under its own context from C, source failure after partial multi-chunk enqueue, transitive A→B→C after original-handle drop, a **confirmed** A→B frontier followed by an unrelated later A failure on a different GPU (must not retroactively fail B), pressure waits never synchronizing a foreign event or foreign-dependent local event, and no claimed recovery on reopen. Use no broad mock framework. |
+| Two physical GPUs | Real staged numerical chain, opposing transfers, source-drop order and multi-chunk bounded staging with two distinct GPU IDs; a consumed pinned upload larger than the pending limit reuses bounded staging rather than retaining the whole input through GPU completion; three independent runtimes across the two GPUs exercise transitive failure and verify that source events are queried only with their own context active. On a one-GPU host explicitly report **not run**. |
+| Required performance; optional vendor consumer | A consumer-owned vendor handle between two small runtime kernels with no runtime vendor dependency. Warm chain reports submissions, physical runtime-managed launches, event and host-wait counts and correctness. Cold prepare compiles once per key; layout-value changes reuse artifact, while headers/options/compiler/target changes invalidate it; each runtime loads its own module, warm execution calls NVRTC zero times. Compare small allocation/launch/transfer to direct cudarc with matched context/pool/stream, recording hardware, driver, toolkit and latency separately from throughput. |
+
+Implement on one working branch; one PR **only after** the standalone runtime, docs and local gates are complete. Sequence: (1) minimal low-level context/stream/pool with safe restoration, typed capability/loading errors and the narrow post-enqueue `cfg(test)` seam; (2) stream-ordered buffer Drop, bounded pinned staging, epoch retirement and lifecycle/auto-trait tests; (3) two-runtime copies plus **early timeout-bounded cross-context witness/foreign-wait experiment on two GPUs**, then full physical multi-GPU numerical/error tests; (4) artifact/binding/raw consumer seam, caches and warm metrics; (5) full independent GPU correctness/performance evidence. No tenferro switch, release, P2P optimization, CUDA Graph, NCCL, ROCm/WebGPU runtime, universal executor or extra crates in this issue. Adoption needs a later maintainer decision.
+
+## 9. Implementation record (this branch)
+
+Source layout follows §7: `context.rs`, `runtime.rs`, `memory.rs`, `transfer.rs`, `retirement.rs`,
+`compile.rs`, `kernel.rs`, `raw.rs`, `error.rs`, `lib.rs`. Production files contain no inline test blocks;
+each has `#[cfg(test)] mod tests;` into `src/<module>/tests/mod.rs`, and `tests/` holds the public-contract
+suites `host_contract.rs`, `gpu_single.rs`, `gpu_multi.rs`, `gpu_faults.rs`.
+
+Decisions taken while implementing, with reasons:
+
+- **Device buffers stay lease-free.** `Buffer::drop` only enqueues `cuMemFreeAsync` on the owning stream. A
+  pointer whose foreign read became uncertain is moved into a domain quarantine list and is freed once at
+  final domain teardown after one successful stream synchronisation; on a broken domain it is leaked.
+- **Epochs are per staging chunk and per sealed keepalive batch.** Kernel submissions record no event; module
+  keepalives accumulate in the open epoch, which is sealed at half the record budget or at an explicit
+  observation boundary. This keeps warm launches free of `cuEventRecord`.
+- **Pressure never blocks on a foreign-dependent event.** Pressure queries foreign witnesses under their own
+  context, and only then queries the local event. There is no `cuEventSynchronize` on foreign events and no
+  library-level timeout knob; a stalled device stalls the caller, which is the documented honesty boundary.
+- **Same-device copy** records `src_ready`, waits on it from the destination, copies, records `dst_done`, and
+  makes the source stream wait on `dst_done`. The `src_ready` event is retained as a witness (it is a
+  same-context event, so observation is cheap) so it cannot be destroyed while a destination wait still
+  references it. Staged copies give each chunk its own source event and destination epoch.
+- **Uninitialised buffers are usable as kernel outputs** through `Arg::DevicePtrUninit`; the only conversion
+  is the `unsafe UninitBuffer::assume_init`.
+- **Compilation defaults to PTX**; `OutputKind::Cubin` requires an explicit `arch` and is produced through the
+  NVRTC CUBIN entry points. Keys hash all inputs and are verified by full request equality on lookup, so a hash
+  collision cannot reuse a different image.
+- **Public surface added beyond the sketch**: `Runtime::observe`, `stream_id`, `alloc_pinned`,
+  `artifact_cache_hits/misses`, `module_loads`, `RawScope::device_ptr_range`.
+- **Admission is one serialised sequence.** A per-runtime operation lock spans reserve → enqueue → commit, so a
+  concurrent observer cannot seal an epoch mid-admission, and two observers cannot settle different epochs.
+  Capacity (bytes *and* records) is reserved before the DMA is enqueued; a commit that fails after the enqueue
+  hands the staging chunk back and the caller abandons it (leaks) instead of freeing storage a queued DMA may
+  still write.
+- **Failed teardown retains, not frees.** If the final drain cannot be proved, the domain leaks its retirement
+  state and a context retain instead of destroying the pool/stream and dropping pending chunks.
+- **Compile identity is complete.** Cache lookups verify the full artifact (request, observed compiler version,
+  image); NVRTC symbols are probed; a program guard destroys the program on every path; option strings are
+  validated before cudarc sees them.
+- **Failure injection is test-only.** A `cfg(test)` point after the enqueue and before the event record/back-wait
+  is exercised by a module-local unit test; production builds have no seam.
+- **Independent reviews** (three at design time, five on the implementation) drove these invariants into the
+  code: serialised admission, reserve-before-enqueue, quarantine and leak-on-unprovable-completion, portable
+  pinned staging, a module cache that retains and evicts by full payload, raw-pointer D2H writes, readiness gated
+  on confirmed upstream witnesses, budget-aware chunk/upload routing, and complete artifact/counter accounting.
+  Counters now cover admitted launches, device allocations, zero fills, completion events (including
+  cross-runtime ones recorded by a copy) and host waits, and tests cover owned-pinned upload on both routes,
+  source mutation after upload, immediate source overwrite after copy admission, and the source-back-wait
+  injection point. Still open: the physical two-GPU run, a paired latency measurement, and the optional
+  vendor-consumer test.
+
+## 8. Acceptance evidence and implementation order
+
+| Lane | Required evidence, not yet performed |
+| --- | --- |
+| CPU-only | Build/fmt/clippy/rustdoc/doctests without initializing CUDA; missing-driver/symbol/capability typed errors; checked span/overflow, trait assertions, pure epoch/quota and transfer-order state tests. Only CPU-selectable unit/integration targets run; hardware tests are **not run**, never silently passed. |
+| One real GPU | Two runtime instances on one ordinal expose different real streams, domain IDs and pool IDs; reject each other's buffers/functions and preserve independent pool/cache stats. Kernel A → real A→B copy → kernel B → readback matches CPU without caller waits. Immediate source overwrite/drop, destination reuse, raw kernel/vendor call, module eviction, bounded staging, cache warm/cold counts, pending handle Drop/forget, panic and last-drop after runtime teardown. Restore the caller context after success/error/unwind **and final destructor**. |
+| Fault injection | One narrow `cfg(test)` wrapper at the owning Driver API call boundary can fail *after* copy enqueue / *before* event record and at source back-wait; module-local unit tests and their child unit-test processes exercise this seam, not integration tests. Assert broken owner and no early reuse. In isolated subprocesses with deadlines, exercise real illegal-address/sticky context errors **early in the copy implementation**: source event queried under its own context from C, source failure after partial multi-chunk enqueue, transitive A→B→C after original-handle drop, a **confirmed** A→B frontier followed by an unrelated later A failure on a different GPU (must not retroactively fail B), pressure waits never synchronizing a foreign event or foreign-dependent local event, and no claimed recovery on reopen. Use no broad mock framework. |
+| Two physical GPUs | Real staged numerical chain, opposing transfers, source-drop order and multi-chunk bounded staging with two distinct GPU IDs; a consumed pinned upload larger than the pending limit reuses bounded staging rather than retaining the whole input through GPU completion; three independent runtimes across the two GPUs exercise transitive failure and verify that source events are queried only with their own context active. On a one-GPU host explicitly report **not run**. |
+| Required performance; optional vendor consumer | A consumer-owned vendor handle between two small runtime kernels with no runtime vendor dependency. Warm chain reports submissions, physical runtime-managed launches, event and host-wait counts and correctness. Cold prepare compiles once per key; layout-value changes reuse artifact, while headers/options/compiler/target changes invalidate it; each runtime loads its own module, warm execution calls NVRTC zero times. Compare small allocation/launch/transfer to direct cudarc with matched context/pool/stream, recording hardware, driver, toolkit and latency separately from throughput. |
+
+Implement on one working branch; one PR **only after** the standalone runtime, docs and local gates are complete. Sequence: (1) minimal low-level context/stream/pool with safe restoration, typed capability/loading errors and the narrow post-enqueue `cfg(test)` seam; (2) stream-ordered buffer Drop, bounded pinned staging, epoch retirement and lifecycle/auto-trait tests; (3) two-runtime copies plus **early timeout-bounded cross-context witness/foreign-wait experiment on two GPUs**, then full physical multi-GPU numerical/error tests; (4) artifact/binding/raw consumer seam, caches and warm metrics; (5) full independent GPU correctness/performance evidence. No tenferro switch, release, P2P optimization, CUDA Graph, NCCL, ROCm/WebGPU runtime, universal executor or extra crates in this issue. Adoption needs a later maintainer decision.
+
+## 9. Implementation record (this branch)
+
+Source layout follows §7: `context.rs`, `runtime.rs`, `memory.rs`, `transfer.rs`, `retirement.rs`,
+`compile.rs`, `kernel.rs`, `raw.rs`, `error.rs`, `lib.rs`. Production files contain no inline test blocks;
+each has `#[cfg(test)] mod tests;` into `src/<module>/tests/mod.rs`, and `tests/` holds the public-contract
+suites `host_contract.rs`, `gpu_single.rs`, `gpu_multi.rs`, `gpu_faults.rs`.
+
+Decisions taken while implementing, with reasons:
+
+- **Device buffers stay lease-free.** `Buffer::drop` only enqueues `cuMemFreeAsync` on the owning stream. A
+  pointer whose foreign read became uncertain is moved into a domain quarantine list and is freed once at
+  final domain teardown after one successful stream synchronisation; on a broken domain it is leaked.
+- **Epochs are per staging chunk and per sealed keepalive batch.** Kernel submissions record no event; module
+  keepalives accumulate in the open epoch, which is sealed at half the record budget or at an explicit
+  observation boundary. This keeps warm launches free of `cuEventRecord`.
+- **Pressure never blocks on a foreign-dependent event.** Pressure queries foreign witnesses under their own
+  context, and only then queries the local event. There is no `cuEventSynchronize` on foreign events and no
+  library-level timeout knob; a stalled device stalls the caller, which is the documented honesty boundary.
+- **Same-device copy** records `src_ready`, waits on it from the destination, copies, records `dst_done`, and
+  makes the source stream wait on `dst_done`. The `src_ready` event is retained as a witness (it is a
+  same-context event, so observation is cheap) so it cannot be destroyed while a destination wait still
+  references it. Staged copies give each chunk its own source event and destination epoch.
+- **Uninitialised buffers are usable as kernel outputs** through `Arg::DevicePtrUninit`; the only conversion
+  is the `unsafe UninitBuffer::assume_init`.
+- **Compilation defaults to PTX**; `OutputKind::Cubin` requires an explicit `arch` and is produced through the
+  NVRTC CUBIN entry points. Keys hash all inputs and are verified by full request equality on lookup, so a hash
+  collision cannot reuse a different image.
+- **Public surface added beyond the sketch**: `Runtime::observe`, `stream_id`, `alloc_pinned`,
+  `artifact_cache_hits/misses`, `module_loads`, `RawScope::device_ptr_range`.
+- **Admission is one serialised sequence.** A per-runtime operation lock spans reserve → enqueue → commit, so a
+  concurrent observer cannot seal an epoch mid-admission, and two observers cannot settle different epochs.
+  Capacity (bytes *and* records) is reserved before the DMA is enqueued; a commit that fails after the enqueue
+  hands the staging chunk back and the caller abandons it (leaks) instead of freeing storage a queued DMA may
+  still write.
+- **Failed teardown retains, not frees.** If the final drain cannot be proved, the domain leaks its retirement
+  state and a context retain instead of destroying the pool/stream and dropping pending chunks.
+- **Compile identity is complete.** Cache lookups verify the full artifact (request, observed compiler version,
+  image); NVRTC symbols are probed; a program guard destroys the program on every path; option strings are
+  validated before cudarc sees them.
+- **Failure injection is test-only.** A `cfg(test)` point after the enqueue and before the event record/back-wait
+  is exercised by a module-local unit test; production builds have no seam.
+- **Post-implementation review corrections** (independent GPT review): serialised admission, reserve-before-
+  enqueue, quarantine on every post-enqueue failure, leak-on-failed-drain, complete artifact identity, cache
+  zero-capacity handling, NVRTC symbol probe/guard, frontier pruning under pressure, transitive upstream
+  witnesses, and retained `done`/`ready` events. A second focused review then found: raw batches must not
+  seal before the callback, teardown must require a drained retirement state (not just a local sync), every
+  post-enqueue copy path (including context activation) must quarantine, `arch` needs the same NUL validation
+  as options, `module_loads` counts real loads independently of retention, and copies must reserve every
+  witness record before enqueue. Those are fixed; still open and reported rather than claimed: witness-status
+  memoisation, module payload charging per live lease, and same-thread observation re-entry inside a raw
+  callback. Also fixed after that review: shared-primary-context restore in `ContextHolder::drop`, portable
+  pinned staging, empty-CUBIN rejection, a module cache that actually retains modules, destructors that honour
+  activation failure, witness-status memoisation, same-thread observation re-entry detection, an event counter,
+  and a single-observation download handle.
+- **Remaining one-GPU items closed in the same branch**: live module bytes are charged against the pending
+  budget; the staged chunk ring can be exercised on one GPU through the doc-hidden
+  `Config::force_staged_route`; and new tests cover foreign function/argument rejection, `UnknownEntryPoint`,
+  a synchronous launch failure, a real driver call inside `with_raw`, CUBIN bind+launch, the staged route's
+  chunk ring, no completion event across plain launches, and dropping a runtime's buffer inside another
+  runtime's raw scope (shared primary context). NVRTC attempt/success counters are now recorded at the
+  compile-call boundary (`ArtifactCache::compile_attempts/successes`, exposed on `Runtime`), independently of
+  cache hits/misses; only a *paired* latency comparison still needs a quiet host. Also closed: raw scopes
+  refuse unregistered buffers, upload/download chunk commits have a test-only fault point, the module cache is
+  keyed per artifact (entry points share one load) with a capacity-eviction test, `Stats` exposes `pool_id`,
+  and blocking observation loops are counted (`host_waits`). A Codex review then fixed: download/staged D2H
+  writes through raw driver pointers instead of a `&mut [u8]` over uninitialised storage; module binding and
+  admission fail with backpressure instead of spinning when live module bytes cannot fit; readiness now requires
+  upstream witnesses to be confirmed (`observe_gated`); destructors keep the context guard alive across their
+  CUDA call; launch arguments are marshalled without heap allocation (and capped at 32); NVRTC attempts are
+  counted around `nvrtc::compile_program`; cache accounting includes the retained request payload.
+  A second Codex iteration then fixed: both D2H paths now use raw driver pointers (no reference over
+  uninitialised staging); confirmed witnesses release their upstream history; module-cache and bind accounting
+  include the full retained artifact/pending budget; `synchronize` counts as a host wait; and the two-GPU test
+  no longer masks the chain with a caller wait. A third iteration fixed module reservation through the
+  admission path, complete cache payload accounting (source, source id, options, architecture), NVRTC success
+  counted at the compiler call rather than at extraction, and warm-chain reporting as matched-window deltas. A
+  fourth iteration made module-cache accounting use the full retained artifact payload, reserved module bytes
+  through the admission lock, checked upstream witnesses before reporting a pending intermediate event, and
+  sized staging chunks to the budget left by live modules. A fifth iteration serialised witness observation,
+  reused only idle chunks that fit the headroom, and chose the owned-upload route against that headroom.
+
+  Still **not implemented** (recorded rather than claimed): counters for physical launches, allocations,
+  zero-fills and cross-runtime event recordings; the one-GPU acceptance rows for owned-pinned upload, source
+  mutation after upload, immediate source overwrite and the source-back-wait injection point.
+
+Validation performed on this branch (A100 80GB PCIe, driver 580.126.09, CUDA 12.6 toolkit):
+
+- `cargo fmt --check`, `cargo clippy -j 16 --workspace --all-targets --all-features -- -D warnings`,
+  `cargo test -j 16 --workspace`, doctests and `cargo doc` pass.
+- `cargo test -j 16 -p t4a-cuda-runtime --features gpu-tests --lib --test host_contract --test gpu_single
+  --test gpu_faults -- --test-threads=1` passes: 37 unit, 18 single-GPU contract and 1 fault test (including two-runtime independence, alignment
+  measurement, cross-thread last drop, context restore after success and unwind, raw-scope poisoning) plus 6
+  single-GPU contract tests and the isolated illegal-address fault test.
+- `tests/gpu_multi.rs` compiles and is **not run**: this host has one physical GPU; the test fails explicitly
+  rather than passing silently when executed on such a host.
+- `examples/warm_chain.rs` (release, `taskset -c 0`) reports 200 warm submissions, the actual completion-event
+  counter (events are amortised per seal, not per launch), about 1.96 µs per submission, and a direct-cudarc
+  submission number measured over the same window. These are shared-host numbers, not a paired result.
+
+Not implemented, deliberately: peer-to-peer fast path, persisted artifacts, CUDA Graphs, NCCL, vendor-adapter
+test, tenferro adoption. The kernel emitter/catalog stays in `t4a-cuda-kernels`.
+
+## References
+
+- [CUDA stream-ordered allocation and free](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/stream-ordered-memory-allocation.html); [minimum driver/runtime allocation alignment](https://docs.nvidia.com/cuda/cuda-c-programming-guide/#device-memory-accesses); [explicit pools](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__MALLOC__ASYNC.html); [cross-context stream waits](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__STREAM.html); [event/error semantics](https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__EVENT.html).
+- [cudarc 0.19.8](https://docs.rs/crate/cudarc/0.19.8): use low-level Driver/NVRTC bindings only; safe `CudaSlice` tracking is not part of this runtime.
