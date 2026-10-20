@@ -36,6 +36,8 @@ pub(crate) struct Limits {
 pub struct RetirementStats {
     /// Bytes held for work that is still in flight.
     pub pending_bytes: usize,
+    /// Bytes retained by live loaded modules.
+    pub module_bytes: usize,
     /// Retirement records (epochs, open leases, unresolved witnesses).
     pub pending_records: usize,
     /// Pinned bytes currently idle in the staging ring.
@@ -237,6 +239,7 @@ struct OpenEpoch {
 
 struct State {
     pending_bytes: usize,
+    module_bytes: usize,
     open: OpenEpoch,
     epochs: VecDeque<Epoch>,
     idle: Vec<PinnedChunk>,
@@ -367,6 +370,7 @@ impl Retirement {
         Self {
             state: Mutex::new(State {
                 pending_bytes: 0,
+                module_bytes: 0,
                 open: OpenEpoch::default(),
                 epochs: VecDeque::new(),
                 idle: Vec::new(),
@@ -421,6 +425,17 @@ impl Retirement {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
+    /// Charge a live module's image size against the pending budget.
+    pub(crate) fn retain_module_bytes(&self, bytes: usize) {
+        self.lock().module_bytes += bytes;
+    }
+
+    /// Release a live module's charge.
+    pub(crate) fn release_module_bytes(&self, bytes: usize) {
+        let mut state = self.lock();
+        state.module_bytes = state.module_bytes.saturating_sub(bytes);
+    }
+
     /// Record a failure that makes further admission unsafe.
     pub(crate) fn mark_broken(&self, detail: impl Into<String>) {
         let mut state = self.lock();
@@ -435,7 +450,7 @@ impl Retirement {
     }
 
     fn capacity_fits(state: &State, limits: &Limits, bytes: usize, records: usize) -> bool {
-        state.pending_bytes + bytes <= limits.pending_bytes
+        state.pending_bytes + state.module_bytes + bytes <= limits.pending_bytes
             && state.pending_records() + records <= limits.pending_records
     }
 
@@ -742,6 +757,7 @@ impl Retirement {
         let state = self.lock();
         let mut stats = state.stats;
         stats.pending_bytes = state.pending_bytes;
+        stats.module_bytes = state.module_bytes;
         stats.pending_records = state.pending_records();
         stats.epochs = state.epochs.len();
         stats.frontiers = state.frontiers.len();

@@ -393,6 +393,7 @@ pub(crate) fn copy_between(
     src: &Arc<Domain>,
     dst: &Arc<Domain>,
     source: &Buffer,
+    force_staged: bool,
 ) -> Result<(Buffer, Completion, CopyRoute)> {
     check_domain(src, source.alloc().domain())?;
     if Arc::ptr_eq(src, dst) {
@@ -421,7 +422,7 @@ pub(crate) fn copy_between(
         }
         let route = if len == 0 {
             CopyRoute::SameDevice
-        } else if src.ordinal() == dst.ordinal() {
+        } else if src.ordinal() == dst.ordinal() && !force_staged {
             copy_same_device(src, dst, source, &out, admission, &upstream)?
         } else {
             copy_staged(src, dst, source, &out, admission, &upstream)?

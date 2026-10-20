@@ -44,6 +44,11 @@ pub struct Config {
     /// Pool memory retained above this size is released at the next
     /// synchronisation. This is a hint, not a hard cap.
     pub pool_release_threshold: usize,
+    /// Test-only: force the staged cross-device route even when both runtimes
+    /// share one ordinal, so the chunked staging protocol can be exercised on a
+    /// single-GPU host. Never enable this in production.
+    #[doc(hidden)]
+    pub force_staged_route: bool,
 }
 
 impl Default for Config {
@@ -58,6 +63,7 @@ impl Default for Config {
             module_cache_entries: 64,
             module_cache_bytes: 256 << 20,
             pool_release_threshold: 256 << 20,
+            force_staged_route: false,
         }
     }
 }

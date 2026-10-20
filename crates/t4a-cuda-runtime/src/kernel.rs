@@ -21,6 +21,7 @@ pub(crate) struct ModuleInner {
     holder: Arc<ContextHolder>,
     module: sys::CUmodule,
     bytes: usize,
+    domain: std::sync::Weak<Domain>,
 }
 
 // SAFETY: a module handle is process-wide and context-scoped. Every use runs
@@ -36,6 +37,9 @@ impl ModuleInner {
 
 impl Drop for ModuleInner {
     fn drop(&mut self) {
+        if let Some(domain) = self.domain.upgrade() {
+            domain.retirement().release_module_bytes(self.bytes);
+        }
         // SAFETY: this is the last reference and every queued use has completed.
         // If the context cannot be activated, leak the module instead of acting
         // on a handle from an inactive context.
@@ -252,11 +256,14 @@ pub(crate) fn bind(
             // the call; the domain context is active.
             let module = unsafe { drv::module::load_data(terminated.as_ptr().cast()) }
                 .map_err(Error::driver("cuModuleLoadData"))?;
+            let image_bytes = artifact.image().len();
             let inner = Arc::new(ModuleInner {
                 holder: Arc::clone(domain.holder()),
                 module,
-                bytes: artifact.image().len(),
+                bytes: image_bytes,
+                domain: Arc::downgrade(domain),
             });
+            domain.retirement().retain_module_bytes(image_bytes);
             cache.insert(artifact, entry, &inner);
             inner
         }

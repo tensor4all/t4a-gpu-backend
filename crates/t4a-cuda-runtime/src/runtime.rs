@@ -202,7 +202,7 @@ impl Runtime {
     ) -> Result<(Buffer, Completion, CopyRoute)> {
         let dst = self.domain()?.clone();
         let src = source_owner.domain()?.clone();
-        transfer::copy_between(&src, &dst, source)
+        transfer::copy_between(&src, &dst, source, self.config.force_staged_route)
     }
 
     /// Retire completed work and report observed asynchronous failures.

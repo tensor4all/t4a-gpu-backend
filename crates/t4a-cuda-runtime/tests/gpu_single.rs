@@ -164,3 +164,189 @@ fn teardown_with_outstanding_work_is_safe() {
     // The buffer outlives the closed runtime and still releases safely.
     drop(buffer);
 }
+
+#[test]
+fn foreign_functions_and_arguments_are_rejected() {
+    let mut a = open(0);
+    let mut b = open(0);
+    let function = bind_scale2(&mut a);
+    let input_a = a.upload(&[1u8, 2, 3, 4]).unwrap();
+    let input_b = b.upload(&[1u8, 2, 3, 4]).unwrap();
+
+    // A function bound by another runtime is refused before any launch.
+    let out = a.alloc_uninit(4, 256).unwrap();
+    // SAFETY: rejected before the driver is called; the ABI is irrelevant.
+    let outcome = unsafe {
+        b.launch(
+            &function,
+            LaunchConfig::new(1, 4),
+            &[
+                Arg::DevicePtr(&input_a),
+                Arg::DevicePtrUninit(&out),
+                Arg::U64(4),
+            ],
+        )
+    };
+    assert!(matches!(
+        outcome,
+        Err(t4a_cuda_runtime::Error::ForeignDomain)
+    ));
+
+    // A buffer from another domain is refused even with a matching function.
+    let function_b = bind_scale2(&mut b);
+    let out_b = b.alloc_uninit(4, 256).unwrap();
+    let _ = &input_b;
+    // SAFETY: rejected before the driver is called.
+    let outcome = unsafe {
+        b.launch(
+            &function_b,
+            LaunchConfig::new(1, 4),
+            &[
+                Arg::DevicePtr(&input_a),
+                Arg::DevicePtrUninit(&out_b),
+                Arg::U64(4),
+            ],
+        )
+    };
+    assert!(matches!(
+        outcome,
+        Err(t4a_cuda_runtime::Error::ForeignDomain)
+    ));
+}
+
+#[test]
+fn unknown_entry_point_is_typed() {
+    let mut runtime = open(0);
+    let request = CompileRequest::new("scale2", SCALE2);
+    let artifact = runtime.compile(&request).unwrap();
+    assert!(matches!(
+        runtime.bind(&artifact, "no_such_kernel"),
+        Err(t4a_cuda_runtime::Error::UnknownEntryPoint { .. })
+    ));
+}
+
+#[test]
+fn synchronous_launch_failure_is_reported() {
+    let mut runtime = open(0);
+    let function = bind_scale2(&mut runtime);
+    let input = runtime.upload(&[1u8, 2, 3, 4]).unwrap();
+    let out = runtime.alloc_uninit(4, 256).unwrap();
+    // 2048 threads per block exceeds the device limit; the driver rejects it.
+    // SAFETY: the launch is rejected by the driver before any kernel runs.
+    let outcome = unsafe {
+        runtime.launch(
+            &function,
+            LaunchConfig::new(1, 4096),
+            &[
+                Arg::DevicePtr(&input),
+                Arg::DevicePtrUninit(&out),
+                Arg::U64(4),
+            ],
+        )
+    };
+    assert!(matches!(
+        outcome,
+        Err(t4a_cuda_runtime::Error::Driver { .. })
+    ));
+}
+
+#[test]
+fn warm_launches_do_not_record_or_wait_per_submission() {
+    let mut runtime = open(0);
+    let function = bind_scale2(&mut runtime);
+    let input = runtime.upload(&[1u8, 2, 3, 4]).unwrap();
+    // The upload itself seals one staging epoch; only the launches are measured.
+    let before = runtime.stats().retirement.events_recorded;
+    for _ in 0..20 {
+        let out = launch_scale2(&mut runtime, &function, &input);
+        std::mem::forget(out);
+    }
+    let after = runtime.stats().retirement.events_recorded;
+    assert_eq!(
+        after, before,
+        "plain launches must not record a completion event"
+    );
+}
+
+#[test]
+fn cubin_artifact_binds_and_runs() {
+    let mut runtime = open(0);
+    let mut request = CompileRequest::new("scale2-cubin", SCALE2);
+    request.output = t4a_cuda_runtime::OutputKind::Cubin;
+    // Local-architecture CUBIN; the validated host is an A100 (sm_80).
+    request.arch = Some("sm_80".to_string());
+    let artifact = runtime.compile(&request).expect("cubin must compile");
+    assert!(artifact.image().len() > 4);
+    let function = runtime.bind(&artifact, "scale2").expect("cubin must bind");
+    let input = runtime.upload(&[1u8, 2, 3, 4]).unwrap();
+    let out = launch_scale2(&mut runtime, &function, &input);
+    let mut pending = runtime.download(&out).unwrap();
+    assert_eq!(pending.wait().unwrap(), vec![2u8, 4, 6, 8]);
+}
+
+#[test]
+fn raw_scope_runs_a_real_driver_call() {
+    use t4a_cuda_runtime::RawResource;
+    let mut runtime = open(0);
+    let buffer = runtime.upload(&[7u8; 32]).unwrap();
+    // SAFETY: a memset over exactly the registered buffer, on this runtime's own
+    // stream, followed by an explicit observation before the readback.
+    unsafe {
+        runtime
+            .with_raw(vec![RawResource::Buffer(&buffer)], |raw| {
+                let ptr = raw.device_ptr(&buffer).unwrap();
+                cudarc::driver::sys::cuMemsetD8Async(
+                    ptr,
+                    0,
+                    32,
+                    raw.stream() as usize as *mut cudarc::driver::sys::CUstream_st,
+                )
+            })
+            .expect("admission must succeed");
+    }
+    let mut pending = runtime.download(&buffer).unwrap();
+    assert_eq!(pending.wait().unwrap(), vec![0u8; 32]);
+}
+
+#[test]
+fn forced_staged_route_moves_bytes_through_the_chunk_ring() {
+    let config = Config {
+        max_chunk_bytes: 4096,
+        max_idle_pinned_bytes: 8192,
+        pending_host_budget: 16_384,
+        force_staged_route: true,
+        ..Config::default()
+    };
+    let mut source_runtime = Runtime::open(0, config.clone()).unwrap();
+    let mut destination = Runtime::open(0, config).unwrap();
+    let payload: Vec<u8> = (0..30_000u32).map(|value| (value % 251) as u8).collect();
+    let source = source_runtime.upload(&payload).unwrap();
+    let (copy, mut completion, route) = destination
+        .copy_between(&mut source_runtime, &source)
+        .expect("staged admission");
+    assert_eq!(route, CopyRoute::Staged);
+    drop(source);
+    completion.wait().expect("staged copy must complete");
+    let mut pending = destination.download(&copy).unwrap();
+    assert_eq!(pending.wait().unwrap(), payload);
+}
+
+#[test]
+fn dropping_a_runtime_buffer_inside_another_runtimes_raw_scope_keeps_its_context() {
+    use t4a_cuda_runtime::RawResource;
+    let mut a = open(0);
+    let mut b = open(0);
+    let doomed = a.upload(&[1u8; 16]).unwrap();
+    let kept = b.upload(&[2u8; 16]).unwrap();
+
+    // SAFETY: dropping a buffer only enqueues its stream-ordered free; no driver
+    // call is made from this closure.
+    unsafe {
+        b.with_raw(vec![RawResource::Buffer(&kept)], |_raw| {
+            drop(doomed);
+        })
+        .expect("raw admission must succeed");
+    }
+    let mut pending = b.download(&kept).unwrap();
+    assert_eq!(pending.wait().unwrap(), vec![2u8; 16]);
+}

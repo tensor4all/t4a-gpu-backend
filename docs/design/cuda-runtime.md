@@ -146,13 +146,19 @@ Decisions taken while implementing, with reasons:
   pinned staging, empty-CUBIN rejection, a module cache that actually retains modules, destructors that honour
   activation failure, witness-status memoisation, same-thread observation re-entry detection, an event counter,
   and a single-observation download handle.
+- **Remaining one-GPU items closed in the same branch**: live module bytes are charged against the pending
+  budget; the staged chunk ring can be exercised on one GPU through the doc-hidden
+  `Config::force_staged_route`; and new tests cover foreign function/argument rejection, `UnknownEntryPoint`,
+  a synchronous launch failure, a real driver call inside `with_raw`, CUBIN bind+launch, the staged route's
+  chunk ring, no completion event across plain launches, and dropping a runtime's buffer inside another
+  runtime's raw scope (shared primary context).
 
 Validation performed on this branch (A100 80GB PCIe, driver 580.126.09, CUDA 12.6 toolkit):
 
 - `cargo fmt --check`, `cargo clippy -j 16 --workspace --all-targets --all-features -- -D warnings`,
   `cargo test -j 16 --workspace`, doctests and `cargo doc` pass.
 - `cargo test -j 16 -p t4a-cuda-runtime --features gpu-tests --lib --test host_contract --test gpu_single
-  --test gpu_faults -- --test-threads=1` passes: 34 unit tests (including two-runtime independence, alignment
+  --test gpu_faults -- --test-threads=1` passes: 34 unit, 14 single-GPU contract and 1 fault test (including two-runtime independence, alignment
   measurement, cross-thread last drop, context restore after success and unwind, raw-scope poisoning) plus 6
   single-GPU contract tests and the isolated illegal-address fault test.
 - `tests/gpu_multi.rs` compiles and is **not run**: this host has one physical GPU; the test fails explicitly
