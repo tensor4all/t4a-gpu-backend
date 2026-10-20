@@ -21,8 +21,9 @@ Validation status:
 - The `gpu-tests` suite passes on one physical A100 80GB (driver 580.126.09, CUDA 12.6 toolkit, NVRTC from it).
 - The two-physical-GPU lane (`tests/gpu_multi.rs`) is not run on a one-GPU host; it fails with an explicit
   message rather than passing silently.
-- `examples/warm_chain.rs` reports warm-chain counters and an indicative direct-cudarc comparison (not a paired
-  benchmark).
+- `examples/warm_chain.rs` reports warm-chain counters (launches, completion events, pending records) and a
+  direct-cudarc submission comparison measured over the same window. Completion events are amortised (one per
+  seal, not per launch); the numbers are shared-host indicative, not a paired benchmark.
 
 Adoption by tenferro remains a separate, later maintainer decision: no backend switch, no kernel-catalog port and
 no CUDA Graph/NCCL/P2P work is part of this milestone.

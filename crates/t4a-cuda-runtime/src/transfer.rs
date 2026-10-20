@@ -290,6 +290,10 @@ impl PendingDownload {
         if state.done < state.data.len() {
             return Ok(None);
         }
+        if state.taken {
+            return Err(Error::invalid("download result was already observed"));
+        }
+        state.taken = true;
         let data = std::mem::take(&mut state.data);
         // SAFETY: every byte was reported initialised by a completed DMA.
         Ok(Some(unsafe { assume_init_vec(data) }))
@@ -371,10 +375,11 @@ impl Completion {
 impl Drop for Completion {
     fn drop(&mut self) {
         // SAFETY: the event is owned here. A failure to activate the context
-        // leaks the event rather than acting on a stale handle.
-        let _scope = self.domain.scope();
-        unsafe {
-            let _ = drv::event::destroy(self.event);
+        // leaks the handle rather than acting on a stale one.
+        if self.domain.scope().is_ok() {
+            unsafe {
+                let _ = drv::event::destroy(self.event);
+            }
         }
     }
 }

@@ -100,6 +100,9 @@ impl CompileRequest {
             if name.contains('\0') || body.contains('\0') {
                 return Err(Error::invalid("header contains a NUL byte"));
             }
+            if name.contains('\n') || name.contains('\r') {
+                return Err(Error::invalid("header name must be a single line"));
+            }
         }
         for option in &self.options {
             if option.contains('\0') {
@@ -254,6 +257,7 @@ pub fn compile(request: &CompileRequest) -> Result<Artifact> {
     if let Some(arch) = &request.arch {
         options.push(format!("--gpu-architecture={arch}"));
     }
+    // SAFETY: `program` was created above and is destroyed by `ProgramGuard`.
     let compiled = unsafe { nvrtc::compile_program(program, &options) };
     if let Err(error) = compiled {
         // SAFETY: the program was created above and not destroyed yet.
@@ -305,6 +309,12 @@ fn cubin_bytes(program: nvrtc_sys::nvrtcProgram) -> Result<Vec<u8>> {
     if !matches!(status, nvrtc_sys::nvrtcResult::NVRTC_SUCCESS) {
         return Err(Error::Compile {
             detail: format!("nvrtcGetCUBINSize returned {status:?}"),
+        });
+    }
+    if size == 0 {
+        return Err(Error::Compile {
+            detail: "NVRTC produced an empty CUBIN (is the target a virtual architecture?)"
+                .to_string(),
         });
     }
     let mut bytes = vec![0u8; size];

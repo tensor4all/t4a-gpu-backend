@@ -142,7 +142,10 @@ Decisions taken while implementing, with reasons:
   as options, `module_loads` counts real loads independently of retention, and copies must reserve every
   witness record before enqueue. Those are fixed; still open and reported rather than claimed: witness-status
   memoisation, module payload charging per live lease, and same-thread observation re-entry inside a raw
-  callback.
+  callback. Also fixed after that review: shared-primary-context restore in `ContextHolder::drop`, portable
+  pinned staging, empty-CUBIN rejection, a module cache that actually retains modules, destructors that honour
+  activation failure, witness-status memoisation, same-thread observation re-entry detection, an event counter,
+  and a single-observation download handle.
 
 Validation performed on this branch (A100 80GB PCIe, driver 580.126.09, CUDA 12.6 toolkit):
 
@@ -154,9 +157,9 @@ Validation performed on this branch (A100 80GB PCIe, driver 580.126.09, CUDA 12.
   single-GPU contract tests and the isolated illegal-address fault test.
 - `tests/gpu_multi.rs` compiles and is **not run**: this host has one physical GPU; the test fails explicitly
   rather than passing silently when executed on such a host.
-- `examples/warm_chain.rs` (release, `taskset -c 0`) reports 200 warm submissions with zero per-launch events,
-  about 1.96 µs per launch, and an indicative unpaired direct-cudarc baseline. These are shared-host numbers,
-  not a paired performance result.
+- `examples/warm_chain.rs` (release, `taskset -c 0`) reports 200 warm submissions, the actual completion-event
+  counter (events are amortised per seal, not per launch), about 1.96 µs per submission, and a direct-cudarc
+  submission number measured over the same window. These are shared-host numbers, not a paired result.
 
 Not implemented, deliberately: peer-to-peer fast path, persisted artifacts, CUDA Graphs, NCCL, vendor-adapter
 test, tenferro adoption. The kernel emitter/catalog stays in `t4a-cuda-kernels`.

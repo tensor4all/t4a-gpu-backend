@@ -6,7 +6,7 @@
 
 use std::ffi::CString;
 use std::ptr;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use cudarc::driver::result::DriverError;
 use cudarc::driver::{result as drv, sys};
@@ -37,11 +37,12 @@ impl ModuleInner {
 impl Drop for ModuleInner {
     fn drop(&mut self) {
         // SAFETY: this is the last reference and every queued use has completed.
-        // A failure to activate leaks the module rather than unloading one that
-        // may still be queued.
-        let _scope = self.holder.activate();
-        unsafe {
-            let _ = drv::module::unload(self.module);
+        // If the context cannot be activated, leak the module instead of acting
+        // on a handle from an inactive context.
+        if self.holder.activate().is_ok() {
+            unsafe {
+                let _ = drv::module::unload(self.module);
+            }
         }
     }
 }
@@ -153,7 +154,7 @@ pub(crate) struct ModuleCache {
 struct ModuleEntry {
     artifact: Arc<Artifact>,
     entry: String,
-    module: Weak<ModuleInner>,
+    module: Arc<ModuleInner>,
     bytes: usize,
 }
 
@@ -168,30 +169,18 @@ impl ModuleCache {
         }
     }
 
-    fn forget_dead(&mut self) {
-        let mut bytes = 0;
-        self.entries.retain(|entry| {
-            let alive = entry.module.strong_count() > 0;
-            if alive {
-                bytes += entry.bytes;
-            }
-            alive
-        });
-        self.bytes = bytes;
-    }
-
-    /// Look up a module bound from exactly this artifact and entry point.
-    ///
-    /// Identity is verified against the full artifact (request, compiler version
-    /// and image), not only against the hash.
     pub(crate) fn lookup(&mut self, artifact: &Artifact, entry: &str) -> Option<Arc<ModuleInner>> {
-        self.forget_dead();
         self.entries
             .iter()
             .find(|candidate| candidate.entry == entry && *candidate.artifact == *artifact)
-            .and_then(|candidate| candidate.module.upgrade())
+            .map(|candidate| Arc::clone(&candidate.module))
     }
 
+    /// Retain a loaded module, evicting by the configured entry/byte bounds.
+    ///
+    /// The cache owns the module, so a bound function can be re-bound without
+    /// reloading; eviction does not unload a module still held by a
+    /// `BoundFunction` or a queued launch.
     pub(crate) fn insert(
         &mut self,
         artifact: &Arc<Artifact>,
@@ -200,7 +189,6 @@ impl ModuleCache {
     ) {
         // Count the real load even when the entry is not retained.
         self.loads += 1;
-        self.forget_dead();
         if self.max_entries == 0 || module.bytes() > self.max_bytes {
             return;
         }
@@ -208,14 +196,14 @@ impl ModuleCache {
             && (self.entries.len() >= self.max_entries
                 || self.bytes + module.bytes() > self.max_bytes)
         {
-            self.entries.remove(0);
-            self.forget_dead();
+            let evicted = self.entries.remove(0);
+            self.bytes = self.bytes.saturating_sub(evicted.bytes);
         }
         self.bytes += module.bytes();
         self.entries.push(ModuleEntry {
             artifact: Arc::clone(artifact),
             entry: entry.to_string(),
-            module: Arc::downgrade(module),
+            module: Arc::clone(module),
             bytes: module.bytes(),
         });
     }
@@ -232,6 +220,8 @@ impl ModuleCache {
         self.loads
     }
 
+    /// Drop cached module references. Bound functions and queued launches keep
+    /// their own references, so this never unloads code still in use.
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.bytes = 0;

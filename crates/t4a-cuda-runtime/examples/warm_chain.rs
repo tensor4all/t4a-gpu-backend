@@ -92,8 +92,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("runtime warm chain");
     println!("  cold compile: {:?}", cold_compile);
     println!(
-        "  {} submissions, 0 per-launch events, {} retirement epochs, {} pending records",
-        iterations, after.retirement.reclaimed_epochs, after.pending_records
+        "  {} launches, {} completion events (amortised {:.3} per launch), {} pending records",
+        iterations,
+        after.retirement.events_recorded,
+        after.retirement.events_recorded as f64 / iterations as f64,
+        after.pending_records
     );
     println!(
         "  per-launch: {:.3} us",
@@ -189,8 +192,10 @@ fn direct_baseline(bytes: &[u8], iterations: usize) -> Result<f64, Box<dyn std::
         for _ in 0..iterations {
             assert_eq!(launch(), sys::CUresult::CUDA_SUCCESS);
         }
-        drv::stream::synchronize(stream)?;
+        // Stop the submission window before synchronising, so this number and the
+        // runtime's submission number cover the same work.
         let elapsed = start.elapsed().as_secs_f64() * 1e6 / iterations as f64;
+        drv::stream::synchronize(stream)?;
         let _ = drv::mem_pool::destroy(pool);
         let _ = drv::stream::destroy(stream);
         let _ = drv::primary_ctx::release(device);

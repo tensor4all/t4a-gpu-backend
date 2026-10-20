@@ -50,6 +50,8 @@ pub struct RetirementStats {
     pub reclaimed_epochs: u64,
     /// Poll iterations spent waiting for the pending budget.
     pub pressure_polls: u64,
+    /// Completion events recorded on the stream.
+    pub events_recorded: u64,
     /// Pinned staging chunks allocated from CUDA.
     pub chunk_allocs: u64,
     /// Staging chunks leaked because completion could not be proved.
@@ -113,11 +115,13 @@ pub(crate) fn fault_point(point: FaultPoint) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn arm_fault(point: FaultPoint) {
     fault::arm(point);
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn disarm_fault() {
     fault::disarm();
 }
@@ -136,8 +140,9 @@ unsafe impl Send for PinnedChunk {}
 impl PinnedChunk {
     pub(crate) fn alloc(holder: &Arc<ContextHolder>, len: usize) -> Result<Self> {
         let _scope = holder.activate()?;
-        // SAFETY: allocating portable pinned host memory with no mapping flags.
-        let ptr = unsafe { drv::malloc_host(len.max(1), 0) }
+        // SAFETY: portable page-locked memory, so the staged cross-device route
+        // may DMA into it from the source context as well.
+        let ptr = unsafe { drv::malloc_host(len.max(1), sys::CU_MEMHOSTALLOC_PORTABLE) }
             .map_err(|e| Error::from_alloc(len, "cuMemHostAlloc", e))? as *mut u8;
         Ok(Self {
             ptr,
@@ -160,12 +165,16 @@ impl Drop for PinnedChunk {
         if self.ptr.is_null() {
             return;
         }
-        // SAFETY: this chunk owns the allocation; it is freed once, after any
-        // queued DMA that read or wrote it has been observed. A failure leaks
-        // the allocation rather than freeing memory that may still be in use.
-        let _scope = self.holder.activate();
-        unsafe {
-            let _ = drv::free_host(self.ptr.cast());
+        // SAFETY: this chunk owns the allocation and is freed once. If the owning
+        // context cannot be activated, leak the memory rather than freeing it
+        // without an active context.
+        match self.holder.activate() {
+            Ok(_scope) => unsafe {
+                let _ = drv::free_host(self.ptr.cast());
+            },
+            // Drop the pointer without freeing: the allocation is deliberately
+            // leaked because its completion cannot be proved.
+            Err(_) => self.ptr = ptr::null_mut(),
         }
     }
 }
@@ -179,6 +188,7 @@ pub(crate) struct SlotState {
     pub(crate) data: Vec<MaybeUninit<u8>>,
     pub(crate) done: usize,
     pub(crate) failed: Option<String>,
+    pub(crate) taken: bool,
 }
 
 impl DownloadSlot {
@@ -188,6 +198,7 @@ impl DownloadSlot {
                 data: vec![MaybeUninit::uninit(); len],
                 done: 0,
                 failed: None,
+                taken: false,
             }),
         })
     }
@@ -245,6 +256,8 @@ pub(crate) struct Witness {
     event: sys::CUevent,
     label: String,
     upstream: Vec<Arc<Witness>>,
+    /// Terminal observation: `Some(None)` = confirmed, `Some(Some(msg))` = failed.
+    terminal: Mutex<Option<Option<String>>>,
 }
 
 // SAFETY: the event belongs to `ctx`; every query activates that context on the
@@ -269,11 +282,31 @@ impl Witness {
             event,
             label: label.into(),
             upstream,
+            terminal: Mutex::new(None),
         })
     }
 
     /// Non-blocking observation under the witness's own context.
+    ///
+    /// The first terminal answer is remembered, so a later unrelated failure in
+    /// the source context cannot retroactively fail an already confirmed
+    /// transfer, and a shared upstream is not re-queried.
     pub(crate) fn query(&self) -> Result<WitnessStatus> {
+        {
+            let terminal = self
+                .terminal
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            match &*terminal {
+                Some(None) => return Ok(WitnessStatus::Done),
+                Some(Some(detail)) => {
+                    return Err(Error::Async {
+                        detail: detail.clone(),
+                    })
+                }
+                None => {}
+            }
+        }
         let _scope = self.ctx.activate()?;
         // SAFETY: `event` was created for this context and is owned by `self`.
         match unsafe { drv::event::query(self.event) } {
@@ -282,9 +315,14 @@ impl Witness {
                 return Ok(WitnessStatus::Pending)
             }
             Err(error) => {
-                return Err(Error::Async {
+                let error = Error::Async {
                     detail: format!("source-context witness `{}`: {error}", self.label),
-                })
+                };
+                *self
+                    .terminal
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = Some(Some(error.to_string()));
+                return Err(error);
             }
         }
         for upstream in &self.upstream {
@@ -292,6 +330,10 @@ impl Witness {
                 return Ok(WitnessStatus::Pending);
             }
         }
+        *self
+            .terminal
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(None);
         Ok(WitnessStatus::Done)
     }
 }
@@ -299,10 +341,11 @@ impl Witness {
 impl Drop for Witness {
     fn drop(&mut self) {
         // SAFETY: the event is owned here and was created for this context. A
-        // failure to activate leaks the event rather than acting on a stale one.
-        let _scope = self.ctx.activate();
-        unsafe {
-            let _ = drv::event::destroy(self.event);
+        // failure to activate leaks the handle rather than acting on a stale one.
+        if self.ctx.activate().is_ok() {
+            unsafe {
+                let _ = drv::event::destroy(self.event);
+            }
         }
     }
 }
@@ -315,6 +358,7 @@ impl Drop for Witness {
 pub(crate) struct Retirement {
     state: Mutex<State>,
     operation: Mutex<()>,
+    owner: Mutex<Option<std::thread::ThreadId>>,
     limits: Limits,
 }
 
@@ -332,6 +376,7 @@ impl Retirement {
                 stats: RetirementStats::default(),
             }),
             operation: Mutex::new(()),
+            owner: Mutex::new(None),
             limits,
         }
     }
@@ -348,7 +393,26 @@ impl Retirement {
         closure: impl FnOnce(&Admission<'_>) -> Result<R>,
     ) -> Result<R> {
         let _operation = self.lock_operation();
+        {
+            let mut owner = self.owner.lock().unwrap_or_else(|p| p.into_inner());
+            *owner = Some(std::thread::current().id());
+        }
+        // Reset the owner on unwind too, so a panicking closure cannot make the
+        // runtime look permanently re-entered.
+        let _owner = OwnerGuard { retirement: self };
         closure(&Admission { retirement: self })
+    }
+
+    /// Reject observation from inside an admission on the same thread instead
+    /// of deadlocking on the operation lock.
+    fn check_reentry(&self) -> Result<()> {
+        let owner = *self.owner.lock().unwrap_or_else(|p| p.into_inner());
+        if owner == Some(std::thread::current().id()) {
+            return Err(Error::invalid(
+                "observation is not allowed from inside an admission on the same thread",
+            ));
+        }
+        Ok(())
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -604,7 +668,9 @@ impl Retirement {
     }
 
     fn record(&self, stream: sys::CUstream) -> Result<sys::CUevent> {
-        record_event(stream)
+        let event = record_event(stream)?;
+        self.lock().stats.events_recorded += 1;
+        Ok(event)
     }
 
     /// Seal the open epoch so its keepalives can be retired.
@@ -634,6 +700,7 @@ impl Retirement {
 
     /// Retire everything that has completed and adopt observed failures.
     pub(crate) fn observe(&self, stream: sys::CUstream) -> Result<()> {
+        self.check_reentry()?;
         let _operation = self.lock_operation();
         self.seal_locked(stream)?;
         while self.settle_one_locked()? {}
@@ -709,6 +776,20 @@ impl State {
 }
 
 /// Construct a download target for `offset` bytes into `slot`.
+struct OwnerGuard<'a> {
+    retirement: &'a Retirement,
+}
+
+impl Drop for OwnerGuard<'_> {
+    fn drop(&mut self) {
+        *self
+            .retirement
+            .owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
+    }
+}
+
 /// Admission view that holds the operation lock for a whole enqueue sequence.
 ///
 /// Resources are reserved here *before* the corresponding CUDA call, so a failed

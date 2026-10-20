@@ -19,6 +19,7 @@ const REQUIRED_SYMBOLS: &[&[u8]] = &[
     b"cuInit\0",
     b"cuDeviceGet\0",
     b"cuDeviceGetCount\0",
+    b"cuDeviceGetName\0",
     b"cuDeviceGetAttribute\0",
     b"cuDevicePrimaryCtxRetain\0",
     b"cuDevicePrimaryCtxRelease_v2\0",
@@ -44,7 +45,6 @@ const REQUIRED_SYMBOLS: &[&[u8]] = &[
     b"cuEventCreate\0",
     b"cuEventRecord\0",
     b"cuEventQuery\0",
-    b"cuEventSynchronize\0",
     b"cuEventDestroy_v2\0",
     b"cuModuleLoadData\0",
     b"cuModuleUnload\0",
@@ -60,10 +60,7 @@ pub(crate) fn init() -> Result<()> {
             detail: "libcuda could not be loaded".to_string(),
         });
     }
-    // SAFETY: the library is present; cuInit(0) is idempotent.
-    let result = unsafe { sys::cuInit(0) };
     drv::init().map_err(Error::driver("cuInit"))?;
-    let _ = result;
     probe_driver_symbols()
 }
 
@@ -192,10 +189,17 @@ impl Drop for ContextHolder {
             let _ = drv::ctx::set_current(self.context);
             let _ = drv::primary_ctx::release(self.device);
             match previous {
-                Some(previous) if previous != self.context => {
+                // Another holder may still retain the same primary context, so the
+                // handle stays valid and must remain current for its user.
+                Some(previous) if previous == self.context => {
+                    if drv::ctx::set_current(previous).is_err() {
+                        let _ = drv::ctx::set_current(ptr::null_mut());
+                    }
+                }
+                Some(previous) => {
                     let _ = drv::ctx::set_current(previous);
                 }
-                _ => {
+                None => {
                     let _ = drv::ctx::set_current(ptr::null_mut());
                 }
             }
