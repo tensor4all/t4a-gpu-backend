@@ -187,21 +187,23 @@ impl ModuleCache {
     pub(crate) fn insert(&mut self, artifact: &Arc<Artifact>, module: &Arc<ModuleInner>) {
         // Count the real load even when the entry is not retained.
         self.loads += 1;
-        if self.max_entries == 0 || module.bytes() > self.max_bytes {
+        // The entry retains the whole artifact (source, headers, options), not
+        // only the loaded image.
+        let retained = artifact.retained_bytes().max(module.bytes());
+        if self.max_entries == 0 || retained > self.max_bytes {
             return;
         }
         while !self.entries.is_empty()
-            && (self.entries.len() >= self.max_entries
-                || self.bytes + module.bytes() > self.max_bytes)
+            && (self.entries.len() >= self.max_entries || self.bytes + retained > self.max_bytes)
         {
             let evicted = self.entries.remove(0);
             self.bytes = self.bytes.saturating_sub(evicted.bytes);
         }
-        self.bytes += module.bytes();
+        self.bytes += retained;
         self.entries.push(ModuleEntry {
             artifact: Arc::clone(artifact),
             module: Arc::clone(module),
-            bytes: module.bytes(),
+            bytes: retained,
         });
     }
 
@@ -238,11 +240,12 @@ pub(crate) fn bind(
         Some(module) => module,
         None => {
             let image_bytes = artifact.image().len();
-            let retirement = domain.retirement();
-            if retirement.module_bytes() + image_bytes > domain.pending_budget() {
-                return Err(Error::Backpressure { bytes: image_bytes });
-            }
             let _scope = domain.scope()?;
+            // Reserve the module against the whole pending budget (staging and
+            // keepalives included) before loading, under the admission lock.
+            domain.retirement().during_admission(|admission| {
+                admission.ensure_capacity(domain.stream(), image_bytes, 1)
+            })?;
             let image = artifact.image();
             if image.is_empty() {
                 return Err(Error::invalid("artifact image is empty"));
@@ -261,6 +264,7 @@ pub(crate) fn bind(
                 domain: Arc::downgrade(domain),
             });
             domain.retirement().retain_module_bytes(image_bytes);
+            let _ = &inner;
             cache.insert(artifact, &inner);
             inner
         }

@@ -112,7 +112,9 @@ fn stage_upload(domain: &Arc<Domain>, buffer: &Buffer, data: &[u8]) -> Result<()
     domain.retirement().during_admission(|admission| {
         let mut offset = 0usize;
         while offset < data.len() {
-            let want = (data.len() - offset).min(admission.chunk_limit());
+            let want = (data.len() - offset)
+                .min(admission.chunk_limit())
+                .min(admission.available_host_bytes().max(1));
             // Capacity is reserved before the stored allocation is taken, and the
             // chunk is committed only after its DMA is enqueued.
             let chunk = admission.take_chunk(domain.holder(), want)?;
@@ -231,7 +233,9 @@ pub(crate) fn download(domain: &Arc<Domain>, buffer: &Buffer) -> Result<PendingD
     domain.retirement().during_admission(|admission| {
         let mut offset = 0usize;
         while offset < buffer.len() {
-            let want = (buffer.len() - offset).min(admission.chunk_limit());
+            let want = (buffer.len() - offset)
+                .min(admission.chunk_limit())
+                .min(admission.available_host_bytes().max(1));
             let chunk = admission.take_chunk(domain.holder(), want)?;
             let len = want.min(chunk.len());
             admission.ensure_capacity(stream, chunk.len(), 1)?;
@@ -566,7 +570,9 @@ fn copy_staged(
     let mut offset = 0usize;
     let chunk_limit = admission.chunk_limit();
     while offset < source.len() {
-        let want = (source.len() - offset).min(chunk_limit);
+        let want = (source.len() - offset)
+            .min(chunk_limit)
+            .min(admission.available_host_bytes().max(1));
         let chunk = admission.take_chunk(dst.holder(), want)?;
         let len = want.min(chunk.len());
         admission.ensure_capacity(dst.stream(), chunk.len(), 2)?;

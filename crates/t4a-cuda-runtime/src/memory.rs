@@ -231,10 +231,6 @@ impl Domain {
             .expect("retirement state is only taken during final teardown")
     }
 
-    pub(crate) fn pending_budget(&self) -> usize {
-        self.retirement().pending_budget()
-    }
-
     pub(crate) fn scope(&self) -> Result<CtxScope> {
         self.holder.activate()
     }

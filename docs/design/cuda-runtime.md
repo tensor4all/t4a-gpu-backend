@@ -167,7 +167,10 @@ Decisions taken while implementing, with reasons:
   include the full retained artifact/pending budget; `synchronize` counts as a host wait; and the two-GPU test
   no longer masks the chain with a caller wait. A third iteration fixed module reservation through the
   admission path, complete cache payload accounting (source, source id, options, architecture), NVRTC success
-  counted at the compiler call rather than at extraction, and warm-chain reporting as matched-window deltas.
+  counted at the compiler call rather than at extraction, and warm-chain reporting as matched-window deltas. A
+  fourth iteration made module-cache accounting use the full retained artifact payload, reserved module bytes
+  through the admission lock, checked upstream witnesses before reporting a pending intermediate event, and
+  sized staging chunks to the budget left by live modules.
 
   Still **not implemented** (recorded rather than claimed): counters for physical launches, allocations,
   zero-fills and cross-runtime event recordings; the one-GPU acceptance rows for owned-pinned upload, source

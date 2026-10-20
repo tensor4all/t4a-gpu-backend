@@ -314,6 +314,21 @@ impl Witness {
                 None => {}
             }
         }
+        // Check upstream dependencies first: a pending intermediate event must not
+        // hide a failure that already happened further upstream.
+        let upstream = self
+            .upstream
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        let mut upstream_pending = false;
+        for dependency in &upstream {
+            match dependency.query() {
+                Ok(WitnessStatus::Pending) => upstream_pending = true,
+                Ok(WitnessStatus::Done) => {}
+                Err(error) => return Err(error),
+            }
+        }
         let _scope = self.ctx.activate()?;
         // SAFETY: `event` was created for this context and is owned by `self`.
         match unsafe { drv::event::query(self.event) } {
@@ -332,15 +347,8 @@ impl Witness {
                 return Err(error);
             }
         }
-        let upstream = self
-            .upstream
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone();
-        for dependency in &upstream {
-            if matches!(dependency.query()?, WitnessStatus::Pending) {
-                return Ok(WitnessStatus::Pending);
-            }
+        if upstream_pending {
+            return Ok(WitnessStatus::Pending);
         }
         // Terminal success: drop the upstream history so repeated copies do not
         // retain completed witness chains.
@@ -771,11 +779,6 @@ impl Retirement {
         Ok(state.frontiers.is_empty())
     }
 
-    /// Bytes retained by live loaded modules.
-    pub(crate) fn module_bytes(&self) -> usize {
-        self.lock().module_bytes
-    }
-
     /// Snapshot the unresolved producer frontiers for export to a downstream
     /// runtime, so observation stays transitive.
     pub(crate) fn frontier_snapshot(&self) -> Vec<Arc<Witness>> {
@@ -945,6 +948,15 @@ impl Admission<'_> {
 
     pub(crate) fn chunk_limit(&self) -> usize {
         self.retirement.limits.max_chunk_bytes
+    }
+
+    /// Largest chunk that still fits beside live modules.
+    pub(crate) fn available_host_bytes(&self) -> usize {
+        let state = self.retirement.lock();
+        self.retirement
+            .limits
+            .pending_bytes
+            .saturating_sub(state.module_bytes)
     }
 }
 
