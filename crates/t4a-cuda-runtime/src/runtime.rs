@@ -137,6 +137,7 @@ impl Runtime {
                 )
             }
             .map_err(Error::driver("cuMemsetD8Async"))?;
+            buffer.alloc().domain().retirement().note_zero_fill();
         }
         Ok(buffer)
     }

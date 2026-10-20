@@ -137,9 +137,11 @@ Decisions taken while implementing, with reasons:
   code: serialised admission, reserve-before-enqueue, quarantine and leak-on-unprovable-completion, portable
   pinned staging, a module cache that retains and evicts by full payload, raw-pointer D2H writes, readiness gated
   on confirmed upstream witnesses, budget-aware chunk/upload routing, and complete artifact/counter accounting.
-  Deliberately **not** implemented: physical-launch/allocation/zero-fill/cross-runtime-event counters, and the
-  one-GPU acceptance rows for owned-pinned upload, source mutation after upload, immediate source overwrite and
-  the source-back-wait injection point.
+  Counters now cover admitted launches, device allocations, zero fills, completion events (including
+  cross-runtime ones recorded by a copy) and host waits, and tests cover owned-pinned upload on both routes,
+  source mutation after upload, immediate source overwrite after copy admission, and the source-back-wait
+  injection point. Still open: the physical two-GPU run, a paired latency measurement, and the optional
+  vendor-consumer test.
 
 ## 8. Acceptance evidence and implementation order
 

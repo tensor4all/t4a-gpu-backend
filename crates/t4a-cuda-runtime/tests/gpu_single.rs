@@ -434,3 +434,67 @@ fn empty_buffers_are_rejected_as_kernel_arguments() {
         Err(t4a_cuda_runtime::Error::InvalidArgument { .. })
     ));
 }
+
+#[test]
+fn counters_track_launches_allocations_zero_fills_and_events() {
+    let mut runtime = open(0);
+    let function = bind_scale2(&mut runtime);
+    let before = runtime.stats().retirement;
+    let input = runtime.upload(&[1u8, 2, 3, 4]).unwrap();
+    let out = runtime.alloc_zeroed(4, 256).unwrap();
+    let after_io = runtime.stats().retirement;
+    assert!(
+        after_io.allocations >= before.allocations + 2,
+        "upload and alloc"
+    );
+    assert_eq!(after_io.zero_fills, before.zero_fills + 1);
+    assert!(
+        after_io.events_recorded > before.events_recorded,
+        "upload chunk"
+    );
+
+    // SAFETY: scale2 reads `input.len()` bytes and overwrites the same span.
+    unsafe {
+        runtime
+            .launch(
+                &function,
+                LaunchConfig::new(1, 4),
+                &[Arg::DevicePtr(&input), Arg::DevicePtr(&out), Arg::U64(4)],
+            )
+            .unwrap();
+    }
+    let after_launch = runtime.stats().retirement;
+    assert_eq!(after_launch.launches, before.launches + 1);
+    let _ = out;
+}
+
+#[test]
+fn source_overwrite_after_copy_admission_keeps_the_copied_bytes() {
+    use t4a_cuda_runtime::RawResource;
+    let config = Config::default();
+    let mut source_runtime = Runtime::open(0, config.clone()).unwrap();
+    let mut destination = Runtime::open(0, config).unwrap();
+    let payload: Vec<u8> = (0..4096u32).map(|value| (value % 251) as u8).collect();
+    let source = source_runtime.upload(&payload).unwrap();
+    let (copy, _completion, _route) = destination
+        .copy_between(&mut source_runtime, &source)
+        .unwrap();
+    // Overwrite the source immediately after admission; the copy must still hold
+    // the bytes it was admitted against.
+    // SAFETY: memset covers exactly the registered source buffer on its stream.
+    unsafe {
+        source_runtime
+            .with_raw(vec![RawResource::Buffer(&source)], |raw| {
+                let ptr = raw.device_ptr(&source).unwrap();
+                cudarc::driver::sys::cuMemsetD8Async(
+                    ptr,
+                    0,
+                    4096,
+                    raw.stream() as usize as *mut cudarc::driver::sys::CUstream_st,
+                )
+            })
+            .unwrap();
+    }
+    let mut pending = destination.download(&copy).unwrap();
+    assert_eq!(pending.wait().unwrap(), payload);
+}

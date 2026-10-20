@@ -379,6 +379,7 @@ pub(crate) unsafe fn launch(
         if status != sys::CUresult::CUDA_SUCCESS {
             return Err(Error::from_driver("cuLaunchKernel", DriverError(status)));
         }
+        domain.retirement().note_launch();
         Ok(())
     })
 }

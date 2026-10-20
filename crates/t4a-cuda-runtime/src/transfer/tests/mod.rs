@@ -110,3 +110,66 @@ fn injected_chunk_commit_failure_poisons_the_owner() {
         Err(crate::Error::Broken { .. })
     ));
 }
+
+#[cfg(feature = "gpu-tests")]
+#[test]
+fn injected_source_back_wait_failure_quarantines_the_source() {
+    use crate::retirement::{arm_fault, disarm_fault, FaultPoint};
+
+    let config = crate::Config::default();
+    let mut source_runtime = crate::Runtime::open(0, config.clone()).unwrap();
+    let mut destination = crate::Runtime::open(0, config).unwrap();
+    let payload: Vec<u8> = (0..1024u32).map(|value| value as u8).collect();
+    let source = source_runtime.upload(&payload).unwrap();
+
+    arm_fault(FaultPoint::BeforeSourceBackWait);
+    let outcome = destination.copy_between(&mut source_runtime, &source);
+    disarm_fault();
+    assert!(
+        outcome.is_err(),
+        "the injected back-wait fault must be reported"
+    );
+    drop(source);
+    assert!(matches!(
+        source_runtime.upload(&payload),
+        Err(crate::Error::Broken { .. })
+    ));
+}
+
+#[cfg(feature = "gpu-tests")]
+#[test]
+fn source_mutation_after_upload_does_not_reach_the_device() {
+    let mut runtime = crate::Runtime::open(0, crate::Config::default()).unwrap();
+    let mut caller = vec![7u8; 4096];
+    let buffer = runtime.upload(&caller).unwrap();
+    // The runtime copied into its own staging before returning.
+    caller.fill(9);
+    let mut pending = runtime.download(&buffer).unwrap();
+    assert_eq!(pending.wait().unwrap(), vec![7u8; 4096]);
+}
+
+#[cfg(feature = "gpu-tests")]
+#[test]
+fn owned_pinned_upload_uses_direct_and_staged_routes() {
+    let config = crate::Config {
+        max_chunk_bytes: 1024,
+        max_idle_pinned_bytes: 2048,
+        pending_host_budget: 2048,
+        ..crate::Config::default()
+    };
+    let mut runtime = crate::Runtime::open(0, config).unwrap();
+
+    // Fits the budget: direct DMA from the consumed pinned allocation.
+    let mut small = runtime.alloc_pinned(512).unwrap();
+    small.as_mut_slice().fill(3);
+    let direct = runtime.upload_owned(small).unwrap();
+    let mut pending = runtime.download(&direct).unwrap();
+    assert_eq!(pending.wait().unwrap(), vec![3u8; 512]);
+
+    // Larger than the budget: staged through bounded chunks.
+    let mut large = runtime.alloc_pinned(8192).unwrap();
+    large.as_mut_slice().fill(5);
+    let staged = runtime.upload_owned(large).unwrap();
+    let mut pending = runtime.download(&staged).unwrap();
+    assert_eq!(pending.wait().unwrap(), vec![5u8; 8192]);
+}

@@ -281,6 +281,7 @@ impl Domain {
                 ptr % alignment as u64
             )));
         }
+        self.retirement().note_allocation();
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.live_allocations += 1;
         state.live_bytes += bytes;

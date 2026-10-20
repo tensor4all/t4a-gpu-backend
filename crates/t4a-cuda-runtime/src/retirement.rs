@@ -52,7 +52,13 @@ pub struct RetirementStats {
     pub reclaimed_epochs: u64,
     /// Poll iterations spent waiting for the pending budget.
     pub pressure_polls: u64,
-    /// Completion events recorded on the stream.
+    /// Kernel launches admitted by the runtime.
+    pub launches: u64,
+    /// Device allocations made by the runtime.
+    pub allocations: u64,
+    /// Zero fills enqueued by the runtime.
+    pub zero_fills: u64,
+    /// Completion events recorded on the stream, including cross-runtime ones.
     pub events_recorded: u64,
     /// Blocking observation loops entered by the caller.
     pub host_waits: u64,
@@ -464,6 +470,26 @@ impl Retirement {
     pub(crate) fn release_module_bytes(&self, bytes: usize) {
         let mut state = self.lock();
         state.module_bytes = state.module_bytes.saturating_sub(bytes);
+    }
+
+    /// Count one admitted kernel launch.
+    pub(crate) fn note_launch(&self) {
+        self.lock().stats.launches += 1;
+    }
+
+    /// Count one device allocation.
+    pub(crate) fn note_allocation(&self) {
+        self.lock().stats.allocations += 1;
+    }
+
+    /// Count one zero fill.
+    pub(crate) fn note_zero_fill(&self) {
+        self.lock().stats.zero_fills += 1;
+    }
+
+    /// Record a completion event and count it, including for cross-runtime work.
+    pub(crate) fn record_completion(&self, stream: sys::CUstream) -> Result<sys::CUevent> {
+        self.record(stream)
     }
 
     /// Count one caller-driven blocking observation loop.

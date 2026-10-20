@@ -12,7 +12,7 @@ use crate::context::ContextHolder;
 use crate::error::{Error, Result};
 use crate::memory::{Alloc, Buffer, Domain};
 use crate::retirement::{
-    download_target, fault_point, record_event, DownloadSlot, FaultPoint, PinnedChunk, Witness,
+    download_target, fault_point, DownloadSlot, FaultPoint, PinnedChunk, Witness,
 };
 
 /// A pinned host buffer the caller fills before handing it to the runtime.
@@ -458,7 +458,7 @@ pub(crate) fn copy_between(
         } else {
             copy_staged(src, dst, source, &out, admission, &upstream)?
         };
-        let event = record_event(dst.stream())?;
+        let event = dst.retirement().record_completion(dst.stream())?;
         Ok((event, route))
     })?;
     Ok((out, Completion::new(Arc::clone(dst), event), route))
@@ -474,7 +474,7 @@ fn copy_same_device(
 ) -> Result<CopyRoute> {
     let ready = {
         let _src_scope = src.scope()?;
-        record_event(src.stream())?
+        src.retirement().record_completion(src.stream())?
     };
     // SAFETY: the event belongs to the shared primary context and both endpoints
     // participate in this admission.
@@ -513,7 +513,7 @@ fn copy_same_device(
         src.mark_broken(error.to_string());
         return Err(error);
     }
-    let done = match record_event(dst.stream()) {
+    let done = match dst.retirement().record_completion(dst.stream()) {
         Ok(event) => event,
         Err(error) => {
             src.quarantine(source.device_ptr());
@@ -596,7 +596,7 @@ fn copy_staged(
                 admission.abandon_chunk(chunk);
                 return Err(Error::from_driver("cuMemcpyDtoHAsync", error));
             }
-            match record_event(src.stream()) {
+            match src.retirement().record_completion(src.stream()) {
                 Ok(event) => event,
                 Err(error) => {
                     src.quarantine(source.device_ptr());
