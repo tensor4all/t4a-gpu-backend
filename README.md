@@ -8,7 +8,7 @@ This repository is being developed separately from tenferro so that execution, m
 
 Design and initial repository setup. No runtime or numerical kernel implementation is present yet.
 
-The first milestone is **[t4a-cuda-runtime](https://github.com/tensor4all/t4a-gpu-backend/issues/1)**: a standalone Rust CUDA execution foundation built on cudarc and CUDA APIs. Its design issue is the source of truth for scope, ownership contracts and acceptance criteria.
+The first milestone is **[t4a-cuda-runtime](https://github.com/tensor4all/t4a-gpu-backend/issues/1)**: a standalone Rust CUDA execution foundation built on cudarc and CUDA APIs. Its design issue is the source of truth for scope, ownership contracts and acceptance criteria. A [draft CUDA detailed design](docs/design/cuda-runtime.md) proposes the mechanisms for review; it does not claim implementation or approval.
 
 ## Boundaries
 
