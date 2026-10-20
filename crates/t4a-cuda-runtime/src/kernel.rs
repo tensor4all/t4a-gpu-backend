@@ -198,6 +198,8 @@ impl ModuleCache {
         entry: &str,
         module: &Arc<ModuleInner>,
     ) {
+        // Count the real load even when the entry is not retained.
+        self.loads += 1;
         self.forget_dead();
         if self.max_entries == 0 || module.bytes() > self.max_bytes {
             return;
@@ -210,7 +212,6 @@ impl ModuleCache {
             self.forget_dead();
         }
         self.bytes += module.bytes();
-        self.loads += 1;
         self.entries.push(ModuleEntry {
             artifact: Arc::clone(artifact),
             entry: entry.to_string(),
@@ -339,7 +340,12 @@ pub(crate) unsafe fn launch(
         // Pin the module before the launch is enqueued so a dropped
         // `BoundFunction` cannot unload code that is still queued, and reserve
         // its record before the submission.
-        admission.add_keepalive(domain.stream(), Box::new(Arc::clone(&function.module)), 0)?;
+        admission.add_keepalive(
+            domain.stream(),
+            Box::new(Arc::clone(&function.module)),
+            0,
+            true,
+        )?;
         let mut params: Vec<*mut std::ffi::c_void> = slots
             .iter_mut()
             .map(|slot| slot.as_mut_ptr().cast())

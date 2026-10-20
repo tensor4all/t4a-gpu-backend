@@ -136,14 +136,20 @@ Decisions taken while implementing, with reasons:
 - **Post-implementation review corrections** (independent GPT review): serialised admission, reserve-before-
   enqueue, quarantine on every post-enqueue failure, leak-on-failed-drain, complete artifact identity, cache
   zero-capacity handling, NVRTC symbol probe/guard, frontier pruning under pressure, transitive upstream
-  witnesses, and retained `done`/`ready` events.
+  witnesses, and retained `done`/`ready` events. A second focused review then found: raw batches must not
+  seal before the callback, teardown must require a drained retirement state (not just a local sync), every
+  post-enqueue copy path (including context activation) must quarantine, `arch` needs the same NUL validation
+  as options, `module_loads` counts real loads independently of retention, and copies must reserve every
+  witness record before enqueue. Those are fixed; still open and reported rather than claimed: witness-status
+  memoisation, module payload charging per live lease, and same-thread observation re-entry inside a raw
+  callback.
 
 Validation performed on this branch (A100 80GB PCIe, driver 580.126.09, CUDA 12.6 toolkit):
 
 - `cargo fmt --check`, `cargo clippy -j 16 --workspace --all-targets --all-features -- -D warnings`,
   `cargo test -j 16 --workspace`, doctests and `cargo doc` pass.
 - `cargo test -j 16 -p t4a-cuda-runtime --features gpu-tests --lib --test host_contract --test gpu_single
-  --test gpu_faults -- --test-threads=1` passes: 35 unit tests (including two-runtime independence, alignment
+  --test gpu_faults -- --test-threads=1` passes: 34 unit tests (including two-runtime independence, alignment
   measurement, cross-thread last drop, context restore after success and unwind, raw-scope poisoning) plus 6
   single-GPU contract tests and the isolated illegal-address fault test.
 - `tests/gpu_multi.rs` compiles and is **not run**: this host has one physical GPU; the test fails explicitly

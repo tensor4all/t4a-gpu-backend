@@ -409,6 +409,11 @@ pub(crate) fn copy_between(
     let upstream = src.retirement().frontier_snapshot();
     let _scope = dst.scope()?;
     let (event, route) = dst.retirement().during_admission(|admission| {
+        // Same-device copies retain two witnesses; staged copies retain one
+        // witness plus one chunk epoch per chunk. Reserve both before enqueue.
+        if len > 0 {
+            admission.ensure_capacity(dst.stream(), 0, 2)?;
+        }
         let route = if len == 0 {
             CopyRoute::SameDevice
         } else if src.ordinal() == dst.ordinal() {
@@ -484,22 +489,26 @@ fn copy_same_device(
         src.mark_broken(error.to_string());
         return Err(error);
     }
-    let back_wait = {
-        let _src_scope = src.scope()?;
-        // SAFETY: CUDA permits waiting on an event from another context on the
-        // same device.
-        unsafe {
-            drv::stream::wait_event(
-                src.stream(),
-                done,
-                sys::CUevent_wait_flags::CU_EVENT_WAIT_DEFAULT,
-            )
+    let source_scope = src.scope();
+    let back_wait = match source_scope {
+        Err(error) => Err(error),
+        Ok(_src_scope) => {
+            // SAFETY: CUDA permits waiting on an event from another context on the
+            // same device.
+            unsafe {
+                drv::stream::wait_event(
+                    src.stream(),
+                    done,
+                    sys::CUevent_wait_flags::CU_EVENT_WAIT_DEFAULT,
+                )
+            }
+            .map_err(Error::driver("cuStreamWaitEvent"))
         }
     };
     if let Err(error) = back_wait {
         src.quarantine(source.device_ptr());
         src.mark_broken("source back-wait failed after copy admission");
-        return Err(Error::from_driver("cuStreamWaitEvent", error));
+        return Err(error);
     }
     // Retain both events through the destination frontier: `ready` is the
     // source-ordering witness (same primary context) and `done` must outlive the
@@ -528,7 +537,7 @@ fn copy_staged(
         let want = (source.len() - offset).min(chunk_limit);
         let chunk = admission.take_chunk(dst.holder(), want)?;
         let len = want.min(chunk.len());
-        admission.ensure_capacity(dst.stream(), chunk.len(), 1)?;
+        admission.ensure_capacity(dst.stream(), chunk.len(), 2)?;
         let staged = {
             let _src_scope = src.scope()?;
             // SAFETY: the source range was checked; the chunk can hold `len`

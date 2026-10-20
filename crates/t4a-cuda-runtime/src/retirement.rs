@@ -687,6 +687,12 @@ impl Retirement {
         self.lock().broken.clone()
     }
 
+    /// Whether every epoch and frontier has been resolved.
+    pub(crate) fn is_drained(&self) -> bool {
+        let state = self.lock();
+        state.epochs.is_empty() && state.open.leases.is_empty() && state.frontiers.is_empty()
+    }
+
     pub(crate) fn pending_budget(&self) -> usize {
         self.limits.pending_bytes
     }
@@ -743,8 +749,11 @@ impl Admission<'_> {
         stream: sys::CUstream,
         keepalive: Box<dyn Any + Send>,
         bytes: usize,
+        allow_seal: bool,
     ) -> Result<()> {
-        self.retirement.seal_if_half_locked(stream)?;
+        if allow_seal {
+            self.retirement.seal_if_half_locked(stream)?;
+        }
         self.retirement.reserve_locked(stream, bytes, 1)?;
         self.retirement.add_keepalive_locked(keepalive, bytes);
         Ok(())

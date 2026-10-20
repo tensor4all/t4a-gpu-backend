@@ -113,7 +113,9 @@ pub(crate) unsafe fn with_raw<R>(
         let bytes: usize = keepalives.iter().map(|(_, bytes)| *bytes).sum();
         admission.ensure_capacity(stream, bytes, keepalives.len())?;
         for (value, bytes) in keepalives {
-            admission.add_keepalive(stream, value, bytes)?;
+            // Never seal this batch before the closure: these keepalives protect
+            // work that has not been enqueued yet.
+            admission.add_keepalive(stream, value, bytes, false)?;
         }
         let mut guard = PanicGuard {
             domain,

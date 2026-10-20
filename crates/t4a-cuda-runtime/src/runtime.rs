@@ -309,9 +309,6 @@ impl Runtime {
     /// [`Error::Broken`].
     pub fn bind(&mut self, artifact: &Arc<Artifact>, entry: &str) -> Result<BoundFunction> {
         let domain = self.domain()?.clone();
-        if self.modules.entries() >= self.config.module_cache_entries {
-            self.modules.clear();
-        }
         match kernel::bind(&domain, &mut self.modules, artifact, entry) {
             Ok(function) => Ok(function),
             Err(Error::Driver { source, .. }) => {

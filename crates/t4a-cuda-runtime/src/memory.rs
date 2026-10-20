@@ -390,7 +390,11 @@ impl Drop for Domain {
                     .unwrap_or_else(|p| p.into_inner())
                     .broken
                     .is_some();
-                if sync_ok && !broken {
+                // A local synchronisation alone does not prove that foreign
+                // witnesses resolved or that retirement is empty.
+                let drained_retirement = self.retirement().observe(self.stream).is_ok()
+                    && self.retirement().is_drained();
+                if sync_ok && !broken && drained_retirement {
                     let quarantined = {
                         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
                         std::mem::take(&mut state.quarantined)
@@ -408,6 +412,7 @@ impl Drop for Domain {
             }
             Err(_) => false,
         };
+        let _scope = self.scope();
         if !drained {
             // Completion could not be proved. Retain (leak) the whole resource
             // bundle rather than releasing pinned staging, modules or the

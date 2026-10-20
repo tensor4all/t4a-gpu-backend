@@ -106,6 +106,9 @@ impl CompileRequest {
                 return Err(Error::invalid("compile option contains a NUL byte"));
             }
         }
+        if self.arch.as_deref().is_some_and(|arch| arch.contains('\0')) {
+            return Err(Error::invalid("target architecture contains a NUL byte"));
+        }
         if self.output == OutputKind::Cubin && self.arch.is_none() {
             return Err(Error::invalid(
                 "cubin output requires an explicit target architecture",
