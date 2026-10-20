@@ -238,13 +238,17 @@ pub(crate) fn download(domain: &Arc<Domain>, buffer: &Buffer) -> Result<PendingD
             // SAFETY: the source range was checked against the buffer length and
             // the chunk can hold `len` bytes; the chunk outlives the DMA through
             // the retirement epoch.
+            // SAFETY: raw driver call; no Rust reference is created over the
+            // uninitialised pinned staging.
             let copied = unsafe {
-                drv::memcpy_dtoh_async(
-                    std::slice::from_raw_parts_mut(chunk.as_ptr(), len),
+                sys::cuMemcpyDtoHAsync_v2(
+                    chunk.as_ptr().cast(),
                     buffer.device_ptr() + offset as u64,
+                    len,
                     stream,
                 )
-            };
+            }
+            .result();
             if let Err(error) = copied {
                 admission.abandon_chunk(chunk);
                 return Err(Error::from_driver("cuMemcpyDtoHAsync", error));
@@ -615,15 +619,17 @@ fn copy_staged(
             admission.abandon_chunk(chunk);
             return Err(Error::from_driver("cuStreamWaitEvent", error));
         }
-        // SAFETY: the destination range was checked and the chunk holds `len`
-        // initialised bytes after the source D2H completes.
+        // SAFETY: raw driver call; the destination range was checked and the
+        // chunk holds `len` bytes written by the source D2H.
         let copied = unsafe {
-            drv::memcpy_htod_async(
+            sys::cuMemcpyHtoDAsync_v2(
                 out.device_ptr() + offset as u64,
-                std::slice::from_raw_parts(chunk.as_ptr(), len),
+                chunk.as_ptr().cast(),
+                len,
                 dst.stream(),
             )
-        };
+        }
+        .result();
         if let Err(error) = copied {
             src.quarantine(source.device_ptr());
             src.mark_broken("staged cuMemcpyHtoDAsync failed");

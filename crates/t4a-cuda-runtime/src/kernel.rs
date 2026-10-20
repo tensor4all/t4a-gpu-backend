@@ -351,10 +351,10 @@ pub(crate) unsafe fn launch(
             0,
             true,
         )?;
-        let mut params: Vec<*mut std::ffi::c_void> = slots
-            .iter_mut()
-            .map(|slot| slot.as_mut_ptr().cast())
-            .collect();
+        let mut params = [std::ptr::null_mut::<std::ffi::c_void>(); MAX_ARGS];
+        for (index, slot) in slots.iter_mut().enumerate().take(args.len()) {
+            params[index] = slot.as_mut_ptr().cast();
+        }
         // SAFETY: the caller guarantees the ABI and pointer validity; the domain
         // context is active and every checked descriptor was validated above.
         let status = unsafe {

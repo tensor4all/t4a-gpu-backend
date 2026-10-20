@@ -253,6 +253,17 @@ pub fn nvrtc_version() -> Result<String> {
 /// with the compiler diagnostics when the program does not compile, and
 /// [`Error::InvalidArgument`] for an invalid request.
 pub fn compile(request: &CompileRequest) -> Result<Artifact> {
+    let mut attempts = 0;
+    let mut successes = 0;
+    compile_counted(request, &mut attempts, &mut successes)
+}
+
+/// Compile, reporting the actual NVRTC call boundary to the caller's counters.
+pub(crate) fn compile_counted(
+    request: &CompileRequest,
+    attempts: &mut u64,
+    successes: &mut u64,
+) -> Result<Artifact> {
     request.validate()?;
     let compiler_version = nvrtc_version()?;
     let program_source = request.program_source();
@@ -268,6 +279,7 @@ pub fn compile(request: &CompileRequest) -> Result<Artifact> {
     if let Some(arch) = &request.arch {
         options.push(format!("--gpu-architecture={arch}"));
     }
+    *attempts += 1;
     // SAFETY: `program` was created above and is destroyed by `ProgramGuard`.
     let compiled = unsafe { nvrtc::compile_program(program, &options) };
     if let Err(error) = compiled {
@@ -293,6 +305,7 @@ pub fn compile(request: &CompileRequest) -> Result<Artifact> {
         }
         OutputKind::Cubin => cubin_bytes(program)?,
     };
+    *successes += 1;
     Ok(Artifact {
         key: request.key(),
         request: request.clone(),
@@ -389,12 +402,12 @@ impl ArtifactCache {
             return Ok(std::sync::Arc::clone(&self.entries[index]));
         }
         self.misses += 1;
-        // Reject invalid requests before counting a compilation attempt.
-        request.validate()?;
-        // Actual NVRTC call-boundary counters, independent of cache statistics.
-        self.attempts += 1;
-        let compiled = compile(request)?;
-        self.successes += 1;
+        let mut attempts = 0;
+        let mut successes = 0;
+        let compiled = compile_counted(request, &mut attempts, &mut successes);
+        self.attempts += attempts;
+        self.successes += successes;
+        let compiled = compiled?;
         let artifact = std::sync::Arc::new(compiled);
         self.insert(std::sync::Arc::clone(&artifact));
         Ok(artifact)

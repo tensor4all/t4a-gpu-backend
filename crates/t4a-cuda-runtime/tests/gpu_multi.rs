@@ -2,6 +2,10 @@
 //!
 //! This target requires two physical GPUs. Run it only on such a host; on a
 //! one-GPU host it fails with an explicit message instead of passing silently.
+//!
+//! Not covered here yet: opposing transfers, forced chunk-ring recycling under
+//! pressure, and cross-context failure propagation. Those acceptance rows remain
+//! open even when this target passes.
 
 #![cfg(feature = "gpu-tests")]
 
@@ -52,9 +56,11 @@ fn three_runtimes_keep_dependencies_across_devices() {
     let payload: Vec<u8> = (0..12_288u32).map(|value| (value % 233) as u8).collect();
 
     let first = a.upload(&payload).unwrap();
-    let (second, mut ab, _) = b.copy_between(&mut a, &first).unwrap();
-    ab.wait().unwrap();
+    let (second, ab, _) = b.copy_between(&mut a, &first).unwrap();
+    // Admit the next hop without waiting for the first, so the chain exercises
+    // ordering rather than a caller-side barrier.
     let (third, mut bc, _) = c.copy_between(&mut b, &second).unwrap();
+    drop(ab);
     drop(second);
     bc.wait().unwrap();
     let mut pending = c.download(&third).unwrap();

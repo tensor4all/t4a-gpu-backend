@@ -335,6 +335,7 @@ impl Domain {
 
     pub(crate) fn synchronize(&self) -> Result<()> {
         let _scope = self.scope()?;
+        self.retirement().note_host_wait();
         while !self.retirement().observe_gated(self.stream)? {
             std::thread::yield_now();
         }

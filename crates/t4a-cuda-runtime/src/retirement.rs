@@ -262,7 +262,7 @@ pub(crate) struct Witness {
     ctx: Arc<ContextHolder>,
     event: sys::CUevent,
     label: String,
-    upstream: Vec<Arc<Witness>>,
+    upstream: Mutex<Vec<Arc<Witness>>>,
     /// Terminal observation: `Some(None)` = confirmed, `Some(Some(msg))` = failed.
     terminal: Mutex<Option<Option<String>>>,
 }
@@ -288,7 +288,7 @@ impl Witness {
             ctx: Arc::clone(ctx),
             event,
             label: label.into(),
-            upstream,
+            upstream: Mutex::new(upstream),
             terminal: Mutex::new(None),
         })
     }
@@ -332,11 +332,22 @@ impl Witness {
                 return Err(error);
             }
         }
-        for upstream in &self.upstream {
-            if matches!(upstream.query()?, WitnessStatus::Pending) {
+        let upstream = self
+            .upstream
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        for dependency in &upstream {
+            if matches!(dependency.query()?, WitnessStatus::Pending) {
                 return Ok(WitnessStatus::Pending);
             }
         }
+        // Terminal success: drop the upstream history so repeated copies do not
+        // retain completed witness chains.
+        self.upstream
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
         *self
             .terminal
             .lock()

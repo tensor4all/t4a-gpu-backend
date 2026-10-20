@@ -161,7 +161,15 @@ Decisions taken while implementing, with reasons:
   admission fail with backpressure instead of spinning when live module bytes cannot fit; readiness now requires
   upstream witnesses to be confirmed (`observe_gated`); destructors keep the context guard alive across their
   CUDA call; launch arguments are marshalled without heap allocation (and capped at 32); NVRTC attempts are
-  counted after request validation; cache accounting includes the retained request payload.
+  counted around `nvrtc::compile_program`; cache accounting includes the retained request payload.
+  A second Codex iteration then fixed: both D2H paths now use raw driver pointers (no reference over
+  uninitialised staging); confirmed witnesses release their upstream history; module-cache and bind accounting
+  include the full retained artifact/pending budget; `synchronize` counts as a host wait; and the two-GPU test
+  no longer masks the chain with a caller wait.
+
+  Still **not implemented** (recorded rather than claimed): counters for physical launches, allocations,
+  zero-fills and cross-runtime event recordings; the one-GPU acceptance rows for owned-pinned upload, source
+  mutation after upload, immediate source overwrite and the source-back-wait injection point.
 
 Validation performed on this branch (A100 80GB PCIe, driver 580.126.09, CUDA 12.6 toolkit):
 
