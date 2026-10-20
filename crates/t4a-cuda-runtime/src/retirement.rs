@@ -349,7 +349,7 @@ impl Drop for Witness {
     fn drop(&mut self) {
         // SAFETY: the event is owned here and was created for this context. A
         // failure to activate leaks the handle rather than acting on a stale one.
-        if self.ctx.activate().is_ok() {
+        if let Ok(_scope) = self.ctx.activate() {
             unsafe {
                 let _ = drv::event::destroy(self.event);
             }
@@ -465,6 +465,15 @@ impl Retirement {
 
     /// Reserve capacity before an enqueue. Requires the operation lock.
     fn reserve_locked(&self, stream: sys::CUstream, bytes: usize, records: usize) -> Result<()> {
+        {
+            let state = self.lock();
+            // Live modules cannot be reclaimed by draining epochs, so an
+            // admission that cannot fit together with them must fail instead of
+            // spinning forever.
+            if state.module_bytes + bytes > self.limits.pending_bytes {
+                return Err(Error::Backpressure { bytes });
+            }
+        }
         if bytes > self.limits.pending_bytes || records > self.limits.pending_records {
             return Err(Error::Backpressure { bytes });
         }
@@ -723,7 +732,18 @@ impl Retirement {
     }
 
     /// Retire everything that has completed and adopt observed failures.
+    ///
+    /// Returns whether every upstream producer witness is confirmed; a pending
+    /// witness means the derived result is not yet trustworthy.
+    pub(crate) fn observe_gated(&self, stream: sys::CUstream) -> Result<bool> {
+        self.observe_inner(stream)
+    }
+
     pub(crate) fn observe(&self, stream: sys::CUstream) -> Result<()> {
+        self.observe_inner(stream).map(|_| ())
+    }
+
+    fn observe_inner(&self, stream: sys::CUstream) -> Result<bool> {
         self.check_reentry()?;
         let _operation = self.lock_operation();
         self.seal_locked(stream)?;
@@ -737,7 +757,12 @@ impl Retirement {
                 detail: detail.clone(),
             });
         }
-        Ok(())
+        Ok(state.frontiers.is_empty())
+    }
+
+    /// Bytes retained by live loaded modules.
+    pub(crate) fn module_bytes(&self) -> usize {
+        self.lock().module_bytes
     }
 
     /// Snapshot the unresolved producer frontiers for export to a downstream

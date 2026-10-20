@@ -393,7 +393,9 @@ fn module_cache_evicts_by_capacity_and_clears() {
 
 #[test]
 fn entry_points_of_one_artifact_share_a_single_module_load() {
-    let source = format!("{SCALE2}\nextern \"C\" __global__ void scale2_b(const unsigned char* i, unsigned char* o, unsigned long long n) {{ scale2(i, o, n); }}\n");
+    let source = format!(
+        "{SCALE2}\nextern \"C\" __global__ void scale2_b(const unsigned char* i, unsigned char* o, unsigned long long n) {{ unsigned long long k = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x; if (k < n) {{ o[k] = (unsigned char)(i[k] * 2u); }} }}\n"
+    );
     let mut runtime = open(0);
     let artifact = runtime
         .compile(&CompileRequest::new("two-entries", source))

@@ -146,6 +146,17 @@ impl Artifact {
         &self.request
     }
 
+    /// Bytes this artifact retains: the image plus the request text and headers.
+    pub fn retained_bytes(&self) -> usize {
+        let headers: usize = self
+            .request
+            .headers
+            .iter()
+            .map(|(name, body)| name.len() + body.len())
+            .sum();
+        self.image.len() + self.request.source.len() + headers
+    }
+
     /// Raw PTX or CUBIN bytes.
     pub fn image(&self) -> &[u8] {
         &self.image
@@ -378,6 +389,8 @@ impl ArtifactCache {
             return Ok(std::sync::Arc::clone(&self.entries[index]));
         }
         self.misses += 1;
+        // Reject invalid requests before counting a compilation attempt.
+        request.validate()?;
         // Actual NVRTC call-boundary counters, independent of cache statistics.
         self.attempts += 1;
         let compiled = compile(request)?;
@@ -390,19 +403,20 @@ impl ArtifactCache {
     fn insert(&mut self, artifact: std::sync::Arc<Artifact>) {
         // A zero-capacity cache keeps nothing, and an image larger than the whole
         // byte budget is not retained, so eviction never removes an absent entry.
-        if self.max_entries == 0 || artifact.image.len() > self.max_bytes {
+        let retained = artifact.retained_bytes();
+        if self.max_entries == 0 || retained > self.max_bytes {
             return;
         }
         while self.entries.len() >= self.max_entries
-            || (self.bytes + artifact.image.len() > self.max_bytes && !self.entries.is_empty())
+            || (self.bytes + retained > self.max_bytes && !self.entries.is_empty())
         {
             if self.entries.is_empty() {
                 return;
             }
             let evicted = self.entries.remove(0);
-            self.bytes = self.bytes.saturating_sub(evicted.image.len());
+            self.bytes = self.bytes.saturating_sub(evicted.retained_bytes());
         }
-        self.bytes += artifact.image.len();
+        self.bytes += retained;
         self.entries.push(artifact);
     }
 

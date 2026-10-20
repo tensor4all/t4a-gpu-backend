@@ -156,7 +156,12 @@ Decisions taken while implementing, with reasons:
   cache hits/misses; only a *paired* latency comparison still needs a quiet host. Also closed: raw scopes
   refuse unregistered buffers, upload/download chunk commits have a test-only fault point, the module cache is
   keyed per artifact (entry points share one load) with a capacity-eviction test, `Stats` exposes `pool_id`,
-  and blocking observation loops are counted (`host_waits`).
+  and blocking observation loops are counted (`host_waits`). A Codex review then fixed: download/staged D2H
+  writes through raw driver pointers instead of a `&mut [u8]` over uninitialised storage; module binding and
+  admission fail with backpressure instead of spinning when live module bytes cannot fit; readiness now requires
+  upstream witnesses to be confirmed (`observe_gated`); destructors keep the context guard alive across their
+  CUDA call; launch arguments are marshalled without heap allocation (and capped at 32); NVRTC attempts are
+  counted after request validation; cache accounting includes the retained request payload.
 
 Validation performed on this branch (A100 80GB PCIe, driver 580.126.09, CUDA 12.6 toolkit):
 

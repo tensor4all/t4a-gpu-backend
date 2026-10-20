@@ -231,6 +231,10 @@ impl Domain {
             .expect("retirement state is only taken during final teardown")
     }
 
+    pub(crate) fn pending_budget(&self) -> usize {
+        self.retirement().pending_budget()
+    }
+
     pub(crate) fn scope(&self) -> Result<CtxScope> {
         self.holder.activate()
     }
@@ -323,9 +327,17 @@ impl Domain {
         self.retirement().observe(self.stream)
     }
 
+    /// Observation that only reports readiness once upstream witnesses resolve.
+    pub(crate) fn observe_gated(&self) -> Result<bool> {
+        let _scope = self.scope()?;
+        self.retirement().observe_gated(self.stream)
+    }
+
     pub(crate) fn synchronize(&self) -> Result<()> {
         let _scope = self.scope()?;
-        self.retirement().observe(self.stream)?;
+        while !self.retirement().observe_gated(self.stream)? {
+            std::thread::yield_now();
+        }
         // SAFETY: the stream belongs to this domain.
         unsafe { drv::stream::synchronize(self.stream) }
             .map_err(Error::driver("cuStreamSynchronize"))

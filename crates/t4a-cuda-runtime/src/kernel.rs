@@ -43,7 +43,7 @@ impl Drop for ModuleInner {
         // SAFETY: this is the last reference and every queued use has completed.
         // If the context cannot be activated, leak the module instead of acting
         // on a handle from an inactive context.
-        if self.holder.activate().is_ok() {
+        if let Ok(_scope) = self.holder.activate() {
             unsafe {
                 let _ = drv::module::unload(self.module);
             }
@@ -237,6 +237,11 @@ pub(crate) fn bind(
     let module = match cache.lookup(artifact) {
         Some(module) => module,
         None => {
+            let image_bytes = artifact.image().len();
+            let retirement = domain.retirement();
+            if retirement.module_bytes() + image_bytes > domain.pending_budget() {
+                return Err(Error::Backpressure { bytes: image_bytes });
+            }
             let _scope = domain.scope()?;
             let image = artifact.image();
             if image.is_empty() {
@@ -249,7 +254,6 @@ pub(crate) fn bind(
             // the call; the domain context is active.
             let module = unsafe { drv::module::load_data(terminated.as_ptr().cast()) }
                 .map_err(Error::driver("cuModuleLoadData"))?;
-            let image_bytes = artifact.image().len();
             let inner = Arc::new(ModuleInner {
                 holder: Arc::clone(domain.holder()),
                 module,
@@ -302,8 +306,13 @@ pub(crate) unsafe fn launch(
     if let Some(detail) = domain.broken() {
         return Err(Error::Broken { detail });
     }
-    let mut slots: Vec<[u64; 1]> = Vec::with_capacity(args.len());
-    for arg in args {
+    // Small launches marshal arguments without heap allocation.
+    const MAX_ARGS: usize = 32;
+    if args.len() > MAX_ARGS {
+        return Err(Error::invalid("a launch accepts at most 32 arguments"));
+    }
+    let mut slots = [[0u64; 1]; MAX_ARGS];
+    for (index, arg) in args.iter().enumerate() {
         let value = match arg {
             Arg::U32(value) => *value as u64,
             Arg::U64(value) => *value,
@@ -329,7 +338,7 @@ pub(crate) unsafe fn launch(
                 buffer.device_ptr()
             }
         };
-        slots.push([value]);
+        slots[index] = [value];
     }
     let _scope = domain.scope()?;
     domain.retirement().during_admission(|admission| {

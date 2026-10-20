@@ -295,7 +295,10 @@ impl PendingDownload {
     /// still pending, and a typed error if the transfer or an upstream dependency
     /// failed.
     pub fn poll(&mut self) -> Result<Option<Vec<u8>>> {
-        self.domain.observe()?;
+        // A derived result is only ready once its upstream sources are confirmed.
+        if !self.domain.observe_gated()? {
+            return Ok(None);
+        }
         let mut state = self.slot.state.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(detail) = &state.failed {
             return Err(Error::Async {
@@ -359,7 +362,9 @@ impl Completion {
 
     /// Non-blocking observation of the destination completion.
     pub fn poll(&mut self) -> Result<Option<()>> {
-        self.domain.observe()?;
+        if !self.domain.observe_gated()? {
+            return Ok(None);
+        }
         if self.done {
             return Ok(Some(()));
         }
@@ -393,7 +398,7 @@ impl Drop for Completion {
     fn drop(&mut self) {
         // SAFETY: the event is owned here. A failure to activate the context
         // leaks the handle rather than acting on a stale one.
-        if self.domain.scope().is_ok() {
+        if let Ok(_scope) = self.domain.scope() {
             unsafe {
                 let _ = drv::event::destroy(self.event);
             }
@@ -565,13 +570,17 @@ fn copy_staged(
             let _src_scope = src.scope()?;
             // SAFETY: the source range was checked; the chunk can hold `len`
             // bytes and outlives the DMA through the destination epoch.
+            // SAFETY: raw driver call — the chunk is uninitialised pinned storage
+            // and only the driver writes it.
             let copied = unsafe {
-                drv::memcpy_dtoh_async(
-                    std::slice::from_raw_parts_mut(chunk.as_ptr(), len),
+                sys::cuMemcpyDtoHAsync_v2(
+                    chunk.as_ptr().cast(),
                     source.device_ptr() + offset as u64,
+                    len,
                     src.stream(),
                 )
-            };
+            }
+            .result();
             if let Err(error) = copied {
                 admission.abandon_chunk(chunk);
                 return Err(Error::from_driver("cuMemcpyDtoHAsync", error));
