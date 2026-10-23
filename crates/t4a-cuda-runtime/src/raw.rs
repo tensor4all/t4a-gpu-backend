@@ -12,6 +12,7 @@ use std::sync::Arc;
 use cudarc::driver::sys;
 
 use crate::error::{Error, Result};
+use crate::kernel::{self, Arg, BoundFunction, LaunchConfig};
 use crate::memory::{check_span, Buffer, Domain};
 use crate::retirement::Admission;
 
@@ -36,6 +37,7 @@ pub struct RawScope<'a> {
     domain: &'a Arc<Domain>,
     stream: sys::CUstream,
     registered: &'a [usize],
+    admission: &'a Admission<'a>,
     _not_send: PhantomData<*const ()>,
 }
 
@@ -76,6 +78,61 @@ impl RawScope<'_> {
         self.device_ptr(buffer)?;
         check_span(buffer.len(), offset, len)?;
         Ok(buffer.device_ptr() + offset as u64)
+    }
+
+    /// Enqueue a checked launch through this runtime's own module cache.
+    ///
+    /// The launch is validated, retained and counted exactly like
+    /// [`crate::Runtime::launch`]; use it when the consumer already holds the stream for
+    /// other work in this scope.
+    ///
+    /// # Safety
+    ///
+    /// As [`crate::Runtime::launch`]: the bound function's kernel ABI must match `args`,
+    /// every device pointer must address the bytes the kernel uses, and any output
+    /// the caller later treats as initialised must be fully overwritten.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ForeignDomain`] for a function or buffer from another runtime,
+    /// [`Error::KernelParameterLimit`] when the arguments exceed the device's
+    /// parameter limit, and [`Error::Driver`] for a failed launch.
+    pub unsafe fn launch(
+        &self,
+        function: &BoundFunction,
+        config: LaunchConfig,
+        args: &[Arg<'_>],
+    ) -> Result<()> {
+        let mut parameters = kernel::prepare(self.domain, function, config, args)?;
+        // The scope seals once, after the closure, so its declared resources stay
+        // pinned while the caller is still enqueueing external work.
+        kernel::enqueue(
+            self.domain,
+            function,
+            &mut parameters,
+            self.admission,
+            false,
+        )
+    }
+
+    /// Keep `value` alive until this scope's work completes.
+    ///
+    /// A vendor call or a foreign function handle never passes through [`Arg`],
+    /// so the runtime cannot see what such an enqueue uses. Register every one of
+    /// those resources here before enqueueing and declare the bytes it retains;
+    /// `bytes` is charged against the pending budget. Arbitrary device pointers,
+    /// foreign streams and the ordering of external work stay the caller's
+    /// responsibility.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Backpressure`] when the pending budget cannot cover `bytes`. A
+    /// raw scope never seals its batch early to make room, because that event
+    /// would cover only the work already queued and the resource could be
+    /// released while a later external enqueue still uses it.
+    pub fn retain(&self, value: Box<dyn Any + Send>, bytes: usize) -> Result<()> {
+        self.admission
+            .add_keepalive(self.stream, value, bytes, false)
     }
 }
 
@@ -141,6 +198,7 @@ pub(crate) unsafe fn with_raw<R>(
             domain,
             stream,
             registered: &registered,
+            admission,
             _not_send: PhantomData,
         };
         // SAFETY: the caller upholds the kernel ABI, pointer bounds and foreign

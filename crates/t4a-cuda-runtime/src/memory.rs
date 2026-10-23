@@ -225,6 +225,11 @@ impl Domain {
         self.stream
     }
 
+    /// Parameter bytes one launch on this device may pass.
+    pub(crate) fn max_kernel_parameter_bytes(&self) -> usize {
+        self.holder.max_kernel_parameter_bytes()
+    }
+
     pub(crate) fn retirement(&self) -> &Retirement {
         self.retirement
             .as_ref()

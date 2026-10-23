@@ -52,9 +52,9 @@ mod transfer;
 pub use compile::{
     compile, nvrtc_version, Artifact, ArtifactCache, CompileKey, CompileRequest, OutputKind,
 };
-pub use context::{device_count, device_name, supports_memory_pool};
+pub use context::{device_count, device_name, max_kernel_parameter_bytes, supports_memory_pool};
 pub use error::{Error, Result};
-pub use kernel::{Arg, BoundFunction, LaunchConfig};
+pub use kernel::{Arg, BoundFunction, LaunchConfig, Pod, MAX_PARAMETER_ALIGN};
 pub use memory::{Buffer, Config, Stats, UninitBuffer};
 pub use raw::{RawResource, RawScope};
 pub use retirement::RetirementStats;

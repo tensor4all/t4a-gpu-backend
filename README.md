@@ -13,7 +13,9 @@ mechanisms as implemented.
 
 `crates/t4a-cuda-runtime/` currently implements the standalone runtime: one real stream and explicit memory pool
 per runtime, stream-ordered device allocation, bounded pinned staging, explicit ordered transfers, cross-runtime
-copies, completion/witness observation, NVRTC artifacts, per-runtime modules and a raw consumer seam.
+copies, completion/witness observation, NVRTC artifacts, per-runtime modules, checked kernel launches (scalar,
+device-pointer and by-value parameter blocks) and a raw consumer seam that can launch through the same launcher
+and register external resources.
 
 Validation status:
 

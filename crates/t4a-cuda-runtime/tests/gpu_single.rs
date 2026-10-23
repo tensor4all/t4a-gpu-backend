@@ -6,7 +6,8 @@
 #![cfg(feature = "gpu-tests")]
 
 use t4a_cuda_runtime::{
-    Arg, Buffer, CompileRequest, Config, CopyRoute, LaunchConfig, Runtime, UninitBuffer,
+    Arg, Buffer, CompileRequest, Config, CopyRoute, LaunchConfig, Pod, RawResource, Runtime,
+    UninitBuffer,
 };
 
 const SCALE2: &str = r#"
@@ -29,6 +30,54 @@ fn bind_scale2(runtime: &mut Runtime) -> t4a_cuda_runtime::BoundFunction {
         .bind(&artifact, "scale2")
         .expect("entry point must bind")
 }
+
+/// The ABI's largest by-value parameter blocks: a 144-byte layout beside a
+/// 4 KiB fused-elementwise block.
+const BY_VALUE: &str = r#"
+typedef struct {
+    int rank;
+    int reserved;
+    long long offset;
+    long long extents[8];
+    long long strides[8];
+} layout144;
+
+typedef struct { unsigned char bytes[4096]; } block4k;
+
+extern "C" __global__ void byvalue(const layout144 layout, const block4k block, unsigned long long* out) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        out[0] = (unsigned long long)layout.rank;
+        out[1] = (unsigned long long)layout.offset;
+        out[2] = (unsigned long long)layout.extents[7];
+        out[3] = (unsigned long long)layout.strides[3];
+        out[4] = (unsigned long long)block.bytes[4095];
+        out[5] = (unsigned long long)block.bytes[0];
+    }
+}
+"#;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Layout144 {
+    rank: i32,
+    reserved: i32,
+    offset: i64,
+    extents: [i64; 8],
+    strides: [i64; 8],
+}
+
+// SAFETY: repr(C) plain data: integers only, no interior pointer and no
+// invariant that reading its padding could break.
+unsafe impl Pod for Layout144 {}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Block4k {
+    bytes: [u8; 4096],
+}
+
+// SAFETY: repr(C) plain data: one byte array, no interior pointer.
+unsafe impl Pod for Block4k {}
 
 fn launch_scale2(
     runtime: &mut Runtime,
@@ -497,4 +546,131 @@ fn source_overwrite_after_copy_admission_keeps_the_copied_bytes() {
     }
     let mut pending = destination.download(&copy).unwrap();
     assert_eq!(pending.wait().unwrap(), payload);
+}
+
+#[test]
+fn by_value_parameters_reach_the_kernel() {
+    let mut runtime = open(0);
+    // A 4 KiB block beside the 144-byte layout needs a Volta-or-later target,
+    // so this compiles a local-architecture CUBIN; the validated host is an A100.
+    let mut request = CompileRequest::new("byvalue", BY_VALUE);
+    request.output = t4a_cuda_runtime::OutputKind::Cubin;
+    request.arch = Some("sm_80".to_string());
+    let artifact = runtime.compile(&request).expect("kernel must compile");
+    let function = runtime.bind(&artifact, "byvalue").expect("bind");
+    let limit = runtime.max_kernel_parameter_bytes().unwrap();
+    assert!(
+        limit >= 4096 + 144,
+        "the device must fit the largest ABI parameter block, got {limit}"
+    );
+
+    let out: UninitBuffer = runtime.alloc_uninit(6 * 8, 256).expect("allocation");
+    let layout = Layout144 {
+        rank: 3,
+        reserved: 0,
+        offset: -5,
+        extents: [0, 1, 2, 3, 4, 5, 6, 7],
+        strides: [10, 11, 12, 13, 14, 15, 16, 17],
+    };
+    let mut block = Block4k { bytes: [0; 4096] };
+    block.bytes[0] = 200;
+    block.bytes[4095] = 111;
+    let before = runtime.stats().retirement;
+    // SAFETY: the kernel reads both blocks by value and writes the six words of
+    // `out`; both blocks stay alive across the call.
+    unsafe {
+        runtime
+            .launch(
+                &function,
+                LaunchConfig::new(1, 1),
+                &[
+                    Arg::pod(&layout),
+                    Arg::pod(&block),
+                    Arg::DevicePtrUninit(&out),
+                ],
+            )
+            .expect("launch must be admitted");
+    }
+    let after = runtime.stats().retirement;
+    assert_eq!(after.launches, before.launches + 1);
+    assert_eq!(
+        after.launch_parameter_bytes,
+        before.launch_parameter_bytes + 144 + 4096 + 8
+    );
+
+    // SAFETY: the launch fully overwrote `out`.
+    let out = unsafe { out.assume_init() };
+    let mut pending = runtime.download(&out).expect("download");
+    let bytes = pending.wait().expect("readback");
+    let words: Vec<u64> = bytes
+        .chunks_exact(8)
+        .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
+        .collect();
+    assert_eq!(
+        words,
+        vec![3, (-5i64) as u64, 7, 13, 111, 200],
+        "the kernel must see the by-value layout and block unchanged"
+    );
+}
+
+#[test]
+fn raw_scope_launch_is_admitted_and_retains_external_resources() {
+    let mut runtime = open(0);
+    let function = bind_scale2(&mut runtime);
+    let input = runtime.upload(&[1u8, 2, 3, 4]).expect("upload");
+    let out: UninitBuffer = runtime.alloc_uninit(input.len(), 256).expect("allocation");
+    let before = runtime.stats().retirement;
+    let external = std::sync::Arc::new(());
+    // SAFETY: scale2 reads `input.len()` bytes and fully overwrites the same span
+    // of `out`; the closure enqueues only that launch on this runtime's stream.
+    unsafe {
+        runtime
+            .with_raw(vec![RawResource::Buffer(&input)], |raw| {
+                // A vendor-style consumer addresses its operands itself, so the
+                // runtime can only learn about them from `retain`.
+                let input = raw.device_ptr(&input)?;
+                raw.retain(Box::new(std::sync::Arc::clone(&external)), 8)?;
+                raw.launch(
+                    &function,
+                    LaunchConfig::new(1, 4),
+                    &[Arg::U64(input), Arg::DevicePtrUninit(&out), Arg::U64(4)],
+                )
+            })
+            .expect("the raw scope must be admitted")
+            .expect("the raw launch must be admitted");
+    }
+    let after = runtime.stats().retirement;
+    assert_eq!(after.launches, before.launches + 1);
+    assert_eq!(
+        after.launch_parameter_bytes,
+        before.launch_parameter_bytes + 24
+    );
+    assert_eq!(
+        std::sync::Arc::strong_count(&external),
+        2,
+        "the scope must keep the registered resource alive past closure exit"
+    );
+    assert!(
+        after.pending_bytes >= before.pending_bytes + 8,
+        "the retained bytes stay reserved until observation"
+    );
+
+    // SAFETY: the launch fully overwrote `out`.
+    let out = unsafe { out.assume_init() };
+    let mut pending = runtime.download(&out).expect("download");
+    assert_eq!(pending.wait().expect("readback"), vec![2, 4, 6, 8]);
+
+    runtime.synchronize().expect("synchronize");
+    for _ in 0..16 {
+        runtime.observe().expect("observe");
+        if std::sync::Arc::strong_count(&external) == 1 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        std::sync::Arc::strong_count(&external),
+        1,
+        "observation must release the retained resource"
+    );
 }

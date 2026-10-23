@@ -26,6 +26,23 @@ fn record_budget_is_enforced() {
 }
 
 #[test]
+fn an_admission_that_may_not_seal_reports_backpressure() {
+    let retirement = Retirement::new(limits());
+    retirement
+        .during_admission(|admission| {
+            // Fill the open batch; it holds leases that are not an epoch yet.
+            admission.add_keepalive(std::ptr::null_mut(), Box::new(1u8), 64, false)?;
+            // A raw scope may not seal its batch to make room, so the second
+            // resource must be refused instead of released early.
+            match admission.add_keepalive(std::ptr::null_mut(), Box::new(2u8), 1, false) {
+                Err(Error::Backpressure { bytes: 1 }) => Ok(()),
+                other => panic!("expected Backpressure, got {:?}", other.err()),
+            }
+        })
+        .unwrap();
+}
+
+#[test]
 fn empty_retirement_reports_zero() {
     let retirement = Retirement::new(limits());
     let stats = retirement.stats();

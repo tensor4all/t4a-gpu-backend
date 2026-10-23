@@ -120,7 +120,9 @@ Decisions taken while implementing, with reasons:
   NVRTC CUBIN entry points. Keys hash all inputs and are verified by full request equality on lookup, so a hash
   collision cannot reuse a different image.
 - **Public surface added beyond the sketch**: `Runtime::observe`, `stream_id`, `alloc_pinned`,
-  `artifact_cache_hits/misses`, `module_loads`, `RawScope::device_ptr_range`.
+  `artifact_cache_hits/misses`, `module_loads`, `RawScope::device_ptr_range`, `RawScope::launch`,
+  `RawScope::retain`, `Arg::Bytes`/`Arg::pod` with `Pod`, `MAX_PARAMETER_ALIGN`,
+  `Runtime::max_kernel_parameter_bytes` and `max_kernel_parameter_bytes(ordinal)`.
 - **Admission is one serialised sequence.** A per-runtime operation lock spans reserve → enqueue → commit, so a
   concurrent observer cannot seal an epoch mid-admission, and two observers cannot settle different epochs.
   Capacity (bytes *and* records) is reserved before the DMA is enqueued; a commit that fails after the enqueue
@@ -179,11 +181,29 @@ Decisions taken while implementing, with reasons:
   references it. Staged copies give each chunk its own source event and destination epoch.
 - **Uninitialised buffers are usable as kernel outputs** through `Arg::DevicePtrUninit`; the only conversion
   is the `unsafe UninitBuffer::assume_init`.
+- **By-value parameters are copied at admission.** `Arg::Bytes` carries the bytes and the alignment the
+  kernel's C type requires; `Arg::pod(&value)` takes both from a `Pod` type. Each block is copied into a buffer
+  of 8-byte words in declaration order, so a launch without blocks still allocates nothing, and the caller's
+  copy may be reused as soon as the launch returns. Blocks are placed on 8-byte boundaries, so an alignment
+  requirement above `MAX_PARAMETER_ALIGN` (8), zero or not a power of two is a typed `InvalidArgument`. The
+  total is checked against the device's kernel parameter limit before anything is enqueued and reported as
+  `KernelParameterLimit`; the limit is 4 KiB below compute capability 7.0 and 32,764 bytes from 7.0 on (CUDA
+  documents it, and the driver exposes no attribute for it), reported by
+  `Runtime::max_kernel_parameter_bytes`/`max_kernel_parameter_bytes(ordinal)`. A NVRTC target older than 7.0
+  still enforces its own 4 KiB limit at compile time. `RetirementStats::launch_parameter_bytes` counts what
+  admitted launches marshalled.
+- **A raw scope can launch through the runtime and declare external resources.** `RawScope::launch` runs the
+  same validation, module pinning, counter and stream as `Runtime::launch`, so a consumer that already holds
+  the stream keeps admission accounting; `RawScope::retain` registers a keepalive for work the runtime cannot
+  see (vendor calls, foreign function handles) and charges it against the pending budget. Arbitrary device
+  pointers, foreign streams and the order of external work remain the caller's responsibility.
 - **Compilation defaults to PTX**; `OutputKind::Cubin` requires an explicit `arch` and is produced through the
   NVRTC CUBIN entry points. Keys hash all inputs and are verified by full request equality on lookup, so a hash
   collision cannot reuse a different image.
 - **Public surface added beyond the sketch**: `Runtime::observe`, `stream_id`, `alloc_pinned`,
-  `artifact_cache_hits/misses`, `module_loads`, `RawScope::device_ptr_range`.
+  `artifact_cache_hits/misses`, `module_loads`, `RawScope::device_ptr_range`, `RawScope::launch`,
+  `RawScope::retain`, `Arg::Bytes`/`Arg::pod` with `Pod`, `MAX_PARAMETER_ALIGN`,
+  `Runtime::max_kernel_parameter_bytes` and `max_kernel_parameter_bytes(ordinal)`.
 - **Admission is one serialised sequence.** A per-runtime operation lock spans reserve → enqueue → commit, so a
   concurrent observer cannot seal an epoch mid-admission, and two observers cannot settle different epochs.
   Capacity (bytes *and* records) is reserved before the DMA is enqueued; a commit that fails after the enqueue

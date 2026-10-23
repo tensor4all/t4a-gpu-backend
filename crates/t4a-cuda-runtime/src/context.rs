@@ -120,6 +120,45 @@ pub fn supports_memory_pool(ordinal: usize) -> Result<bool> {
     Ok(supported != 0)
 }
 
+/// Kernel parameter bytes one launch on `ordinal` may pass.
+///
+/// CUDA documents 4 KiB below compute capability 7.0 and 32,764 bytes from 7.0
+/// on, and the driver exposes no attribute for the limit, so it is derived from
+/// the device's major compute capability. Large parameters also need a compiler
+/// and driver that support them (NVRTC enforces the limit of its own target at
+/// compile time), which this value does not promise: a launch that exceeds them
+/// fails with [`Error::Driver`] from `cuLaunchKernel`.
+///
+/// # Errors
+///
+/// [`Error::InvalidDevice`] for an unknown ordinal and [`Error::Driver`] for a
+/// failing driver call.
+pub fn max_kernel_parameter_bytes(ordinal: usize) -> Result<usize> {
+    kernel_parameter_limit(device(ordinal)?)
+}
+
+fn kernel_parameter_limit(device: sys::CUdevice) -> Result<usize> {
+    // SAFETY: `device` came from cuDeviceGet.
+    let major = unsafe {
+        drv::device::get_attribute(
+            device,
+            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+        )
+    }
+    .map_err(Error::driver("cuDeviceGetAttribute"))?;
+    Ok(if major >= 7 {
+        MAX_KERNEL_PARAMETER_BYTES
+    } else {
+        LEGACY_MAX_KERNEL_PARAMETER_BYTES
+    })
+}
+
+/// Kernel parameter bytes one launch may pass from compute capability 7.0 on.
+const MAX_KERNEL_PARAMETER_BYTES: usize = 32_764;
+
+/// Kernel parameter bytes one launch may pass below compute capability 7.0.
+const LEGACY_MAX_KERNEL_PARAMETER_BYTES: usize = 4_096;
+
 /// A retained CUDA primary context for one device.
 ///
 /// The handle keeps the primary context alive for as long as any buffer,
@@ -130,6 +169,7 @@ pub(crate) struct ContextHolder {
     device: sys::CUdevice,
     context: sys::CUcontext,
     ordinal: usize,
+    max_kernel_parameter_bytes: usize,
 }
 
 // SAFETY: a retained context handle is process-wide and not thread-affine; every
@@ -145,6 +185,7 @@ impl ContextHolder {
                 "device does not support CUDA memory pools",
             ));
         }
+        let max_kernel_parameter_bytes = kernel_parameter_limit(device)?;
         // SAFETY: `device` is a valid ordinal from cuDeviceGet.
         let context = unsafe { drv::primary_ctx::retain(device) }
             .map_err(Error::driver("cuDevicePrimaryCtxRetain"))?;
@@ -152,11 +193,17 @@ impl ContextHolder {
             device,
             context,
             ordinal,
+            max_kernel_parameter_bytes,
         }))
     }
 
     pub(crate) fn ordinal(&self) -> usize {
         self.ordinal
+    }
+
+    /// Parameter bytes one launch on this device may pass.
+    pub(crate) fn max_kernel_parameter_bytes(&self) -> usize {
+        self.max_kernel_parameter_bytes
     }
 
     #[allow(dead_code)]
