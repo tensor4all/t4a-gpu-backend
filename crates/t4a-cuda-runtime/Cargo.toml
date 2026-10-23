@@ -14,7 +14,7 @@ default = []
 gpu-tests = []
 
 [dependencies]
-cudarc = { version = "=0.19.8", default-features = false, features = [
+cudarc = { version = "=0.19.10", default-features = false, features = [
     "std",
     "driver",
     "nvrtc",
@@ -26,7 +26,7 @@ thiserror = "2"
 # Only for the fault-injection integration test, which must provoke a real
 # asynchronous driver failure through the runtime's own stream.
 [dev-dependencies]
-cudarc = { version = "=0.19.8", default-features = false, features = [
+cudarc = { version = "=0.19.10", default-features = false, features = [
     "std",
     "driver",
     "dynamic-loading",
