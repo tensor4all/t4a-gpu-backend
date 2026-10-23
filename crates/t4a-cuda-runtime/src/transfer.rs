@@ -360,7 +360,7 @@ pub struct Completion {
 unsafe impl Send for Completion {}
 
 impl Completion {
-    fn new(domain: Arc<Domain>, event: sys::CUevent) -> Self {
+    pub(crate) fn new(domain: Arc<Domain>, event: sys::CUevent) -> Self {
         Self {
             domain,
             event,

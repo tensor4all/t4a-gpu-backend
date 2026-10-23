@@ -215,6 +215,30 @@ impl Runtime {
         self.domain()?.observe()
     }
 
+    /// Record a completion checkpoint on this runtime's stream.
+    ///
+    /// The returned handle resolves once every operation queued before it has
+    /// completed, including work the caller submitted itself (kernels, vendor calls
+    /// inside [`Runtime::with_raw`], zero fills and copies). It is the handle a
+    /// consumer keeps to wait for its own submission without a host-wide
+    /// synchronisation: recording the checkpoint counts one completion event and
+    /// does not block.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Driver`] when the event cannot be created, recorded or the context
+    /// cannot be activated, and [`Error::Broken`] after an earlier unrecoverable
+    /// failure.
+    pub fn checkpoint(&mut self) -> Result<Completion> {
+        let domain = self.domain()?.clone();
+        if let Some(detail) = domain.broken() {
+            return Err(Error::Broken { detail });
+        }
+        let _scope = domain.scope()?;
+        let event = domain.retirement().record_completion(domain.stream())?;
+        Ok(Completion::new(domain, event))
+    }
+
     /// Wait for every queued operation on this runtime's stream.
     ///
     /// # Errors
