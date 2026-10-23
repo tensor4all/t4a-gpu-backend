@@ -54,6 +54,8 @@ pub struct RetirementStats {
     pub pressure_polls: u64,
     /// Kernel launches admitted by the runtime.
     pub launches: u64,
+    /// Parameter bytes marshalled by admitted launches, by-value blocks included.
+    pub launch_parameter_bytes: u64,
     /// Device allocations made by the runtime.
     pub allocations: u64,
     /// Zero fills enqueued by the runtime.
@@ -472,9 +474,11 @@ impl Retirement {
         state.module_bytes = state.module_bytes.saturating_sub(bytes);
     }
 
-    /// Count one admitted kernel launch.
-    pub(crate) fn note_launch(&self) {
-        self.lock().stats.launches += 1;
+    /// Count one admitted kernel launch and the parameter bytes it marshalled.
+    pub(crate) fn note_launch(&self, parameter_bytes: usize) {
+        let mut state = self.lock();
+        state.stats.launches += 1;
+        state.stats.launch_parameter_bytes += parameter_bytes as u64;
     }
 
     /// Count one device allocation.
@@ -516,7 +520,18 @@ impl Retirement {
     }
 
     /// Reserve capacity before an enqueue. Requires the operation lock.
-    fn reserve_locked(&self, stream: sys::CUstream, bytes: usize, records: usize) -> Result<()> {
+    ///
+    /// `may_seal` decides whether pressure may seal the open batch to make its
+    /// leases reclaimable. A raw scope passes `false`: sealing records an event
+    /// for the work already queued, so a resource it declared for *later*
+    /// external enqueues could be released while that work still runs.
+    fn reserve_locked(
+        &self,
+        stream: sys::CUstream,
+        bytes: usize,
+        records: usize,
+        may_seal: bool,
+    ) -> Result<()> {
         {
             let state = self.lock();
             // Live modules cannot be reclaimed by draining epochs, so an
@@ -546,9 +561,13 @@ impl Retirement {
             if !settled && !pruned {
                 // Nothing completed. Seal the open epoch so its leases become
                 // reclaimable, then wait for progress instead of blocking on a
-                // foreign-dependent event.
+                // foreign-dependent event. An admission that may not seal fails
+                // instead of releasing a resource its owner still needs.
                 let open = { !self.lock().open.leases.is_empty() };
                 if open {
+                    if !may_seal {
+                        return Err(Error::Backpressure { bytes });
+                    }
                     self.seal_locked(stream)?;
                     continue;
                 }
@@ -910,7 +929,7 @@ impl Admission<'_> {
         bytes: usize,
         records: usize,
     ) -> Result<()> {
-        self.retirement.reserve_locked(stream, bytes, records)
+        self.retirement.reserve_locked(stream, bytes, records, true)
     }
 
     /// Commit a chunk after its DMA has been enqueued.
@@ -934,12 +953,12 @@ impl Admission<'_> {
         stream: sys::CUstream,
         keepalive: Box<dyn Any + Send>,
         bytes: usize,
-        allow_seal: bool,
+        may_seal: bool,
     ) -> Result<()> {
-        if allow_seal {
+        if may_seal {
             self.retirement.seal_if_half_locked(stream)?;
         }
-        self.retirement.reserve_locked(stream, bytes, 1)?;
+        self.retirement.reserve_locked(stream, bytes, 1, may_seal)?;
         self.retirement.add_keepalive_locked(keepalive, bytes);
         Ok(())
     }

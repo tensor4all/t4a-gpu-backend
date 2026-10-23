@@ -340,6 +340,20 @@ impl Runtime {
         }
     }
 
+    /// Kernel parameter bytes this device accepts in one launch.
+    ///
+    /// The driver exposes no attribute for the limit, so it follows the device's
+    /// major compute capability: 4 KiB below 7.0 and 32,764 bytes from 7.0 on.
+    /// Large parameters also need a compiler and driver that support them, which
+    /// this value does not promise; exceeding them fails in `cuLaunchKernel`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Closed`] after [`Runtime::close`].
+    pub fn max_kernel_parameter_bytes(&self) -> Result<usize> {
+        Ok(self.domain()?.max_kernel_parameter_bytes())
+    }
+
     /// Enqueue a checked kernel launch.
     ///
     /// # Safety

@@ -96,6 +96,14 @@ pub enum Error {
         /// Bytes the new admission needs.
         bytes: usize,
     },
+    /// A launch's arguments exceed the device's kernel parameter limit.
+    #[error("kernel parameters total {bytes} bytes, above this device's {limit}-byte limit")]
+    KernelParameterLimit {
+        /// Total parameter bytes this launch needs.
+        bytes: usize,
+        /// Limit reported for this device.
+        limit: usize,
+    },
     /// The buffer belongs to another allocation domain.
     #[error("buffer belongs to a different allocation domain")]
     ForeignDomain,

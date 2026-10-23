@@ -41,6 +41,15 @@ fn device_probe_reports_a_typed_result() {
 }
 
 #[test]
+fn kernel_parameter_limit_is_a_typed_probe() {
+    match t4a_cuda_runtime::max_kernel_parameter_bytes(usize::MAX) {
+        Err(Error::InvalidDevice { .. } | Error::DriverUnavailable { .. }) => {}
+        Err(other) => panic!("unexpected probe error: {other}"),
+        Ok(limit) => panic!("an unknown ordinal must not report a limit ({limit})"),
+    }
+}
+
+#[test]
 fn compile_request_key_invalidates_every_input() {
     let base = CompileRequest::new("k", "extern \"C\" __global__ void k() {}").key();
     let mut request = CompileRequest::new("k", "extern \"C\" __global__ void k() {}");
@@ -62,6 +71,11 @@ fn errors_expose_typed_categories() {
     );
     let error = Error::Backpressure { bytes: 64 };
     assert!(error.to_string().contains("64"));
+    let error = Error::KernelParameterLimit {
+        bytes: 8192,
+        limit: 4096,
+    };
+    assert!(error.to_string().contains("4096"));
 }
 
 #[test]
