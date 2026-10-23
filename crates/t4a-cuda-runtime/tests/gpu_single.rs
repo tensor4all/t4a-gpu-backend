@@ -674,3 +674,39 @@ fn raw_scope_launch_is_admitted_and_retains_external_resources() {
         "observation must release the retained resource"
     );
 }
+
+#[test]
+fn a_checkpoint_resolves_after_the_work_queued_before_it() {
+    let mut runtime = open(0);
+    let function = bind_scale2(&mut runtime);
+    let input = runtime.upload(&[1u8, 2, 3, 4]).expect("upload");
+    let out: UninitBuffer = runtime.alloc_uninit(input.len(), 256).expect("allocation");
+    let before = runtime.stats().retirement;
+    // SAFETY: scale2 reads `input.len()` bytes and fully overwrites the same span.
+    unsafe {
+        runtime
+            .launch(
+                &function,
+                LaunchConfig::new(1, 4),
+                &[
+                    Arg::DevicePtr(&input),
+                    Arg::DevicePtrUninit(&out),
+                    Arg::U64(4),
+                ],
+            )
+            .expect("launch must be admitted");
+    }
+    let mut checkpoint = runtime.checkpoint().expect("checkpoint");
+    assert_eq!(
+        runtime.stats().retirement.events_recorded,
+        before.events_recorded + 1,
+        "a checkpoint records exactly one completion event"
+    );
+
+    // SAFETY: the launch fully overwrote `out`.
+    let out = unsafe { out.assume_init() };
+    let mut pending = runtime.download(&out).expect("download");
+    assert_eq!(pending.wait().expect("readback"), vec![2, 4, 6, 8]);
+    // The checkpoint covers the launch and the download that followed it.
+    checkpoint.wait().expect("the checkpoint must resolve");
+}

@@ -108,6 +108,16 @@ findings; all were verified against the source and fixed, except where noted:
   sections 8/9 in `docs/design/cuda-runtime.md` are pre-existing drift, unrelated
   to this change, and were left alone.
 
+## Follow-up: the completion checkpoint
+
+`Runtime::checkpoint` (same branch family, tenferro's adoption needs it for source
+publication) records one completion event on the runtime's stream and returns the
+`Completion` handle a copy yields, so a consumer can wait for work it submitted
+itself without a host-wide synchronisation. It records exactly one event
+(`retirement.events_recorded` grows by one) and never blocks.
+`a_checkpoint_resolves_after_the_work_queued_before_it` covers it on the local A100:
+the checkpoint resolves after the launch and the download queued behind it.
+
 ## Not done here
 
 - No tenferro-side change: the consumer port stays in tenferro-rs#2208.

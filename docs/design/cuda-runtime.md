@@ -116,10 +116,15 @@ Decisions taken while implementing, with reasons:
   references it. Staged copies give each chunk its own source event and destination epoch.
 - **Uninitialised buffers are usable as kernel outputs** through `Arg::DevicePtrUninit`; the only conversion
   is the `unsafe UninitBuffer::assume_init`.
+- **A consumer can wait for its own submission.** `Runtime::checkpoint` records one
+  completion event on the runtime's stream and returns the same `Completion` handle a
+  copy yields, so a consumer that submits kernels or vendor calls itself has a
+  handle to wait on without a host-wide synchronisation. It records one event and
+  never blocks; the event is counted in `events_recorded`.
 - **Compilation defaults to PTX**; `OutputKind::Cubin` requires an explicit `arch` and is produced through the
   NVRTC CUBIN entry points. Keys hash all inputs and are verified by full request equality on lookup, so a hash
   collision cannot reuse a different image.
-- **Public surface added beyond the sketch**: `Runtime::observe`, `stream_id`, `alloc_pinned`,
+- **Public surface added beyond the sketch**: `Runtime::observe`, `checkpoint`, `stream_id`, `alloc_pinned`,
   `artifact_cache_hits/misses`, `module_loads`, `RawScope::device_ptr_range`, `RawScope::launch`,
   `RawScope::retain`, `Arg::Bytes`/`Arg::pod` with `Pod`, `MAX_PARAMETER_ALIGN`,
   `Runtime::max_kernel_parameter_bytes` and `max_kernel_parameter_bytes(ordinal)`.
