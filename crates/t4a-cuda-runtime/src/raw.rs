@@ -36,7 +36,7 @@ pub enum RawResource<'a> {
 pub struct RawScope<'a> {
     domain: &'a Arc<Domain>,
     stream: sys::CUstream,
-    registered: &'a [usize],
+    registered: &'a std::cell::RefCell<Vec<usize>>,
     admission: &'a Admission<'a>,
     _not_send: PhantomData<*const ()>,
 }
@@ -64,10 +64,32 @@ impl RawScope<'_> {
             return Err(Error::ForeignDomain);
         }
         let pointer = buffer.device_ptr() as usize;
-        if !self.registered.contains(&pointer) {
+        if !self.registered.borrow().contains(&pointer) {
             return Err(Error::invalid(
                 "buffer was not registered with this raw scope",
             ));
+        }
+        Ok(pointer as u64)
+    }
+
+    /// Register `buffer` with this scope and return its device pointer.
+    ///
+    /// A caller that only learns which allocation it will address *inside* the scope — a vendor
+    /// plan that names its own workspace, an extension that picks its operand at execution time —
+    /// registers it here instead of listing it up front. The registration is idempotent and is
+    /// checked exactly like a declared one: the buffer must belong to this scope's domain.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ForeignDomain`] for a buffer of another runtime.
+    pub fn register(&self, buffer: &Buffer) -> Result<u64> {
+        if !Arc::ptr_eq(buffer.alloc().domain(), self.domain) {
+            return Err(Error::ForeignDomain);
+        }
+        let pointer = buffer.device_ptr() as usize;
+        let mut registered = self.registered.borrow_mut();
+        if !registered.contains(&pointer) {
+            registered.push(pointer);
         }
         Ok(pointer as u64)
     }
@@ -194,6 +216,7 @@ pub(crate) unsafe fn with_raw<R>(
             admission,
             armed: true,
         };
+        let registered = std::cell::RefCell::new(registered);
         let raw = RawScope {
             domain,
             stream,

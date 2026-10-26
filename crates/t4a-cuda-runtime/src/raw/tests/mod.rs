@@ -53,3 +53,43 @@ fn unregistered_buffers_are_refused_inside_a_raw_scope() {
         other => panic!("expected an invalid-argument refusal, got {other:?}"),
     }
 }
+
+#[cfg(feature = "gpu-tests")]
+#[test]
+fn a_buffer_can_be_registered_after_the_scope_opens() {
+    let mut runtime = crate::Runtime::open(0, crate::Config::default()).unwrap();
+    let declared = runtime.alloc_zeroed(64, 256).unwrap();
+    let late = runtime.alloc_zeroed(128, 256).unwrap();
+    // SAFETY: the closure only reads addresses; the late buffer is registered before its address
+    // is used, and both allocations outlive the scope.
+    let (late_ptr, declared_ptr) = unsafe {
+        runtime
+            .with_raw(vec![RawResource::Buffer(&declared)], |raw| {
+                let late_ptr = raw.register(&late).unwrap();
+                // Registration is idempotent and makes the buffer readable through the scope.
+                assert_eq!(raw.register(&late).unwrap(), late_ptr);
+                assert_eq!(raw.device_ptr(&late).unwrap(), late_ptr);
+                (late_ptr, raw.device_ptr(&declared).unwrap())
+            })
+            .unwrap()
+    };
+    assert_ne!(late_ptr, 0);
+    assert_ne!(late_ptr, declared_ptr);
+    runtime.synchronize().unwrap();
+}
+
+#[cfg(feature = "gpu-tests")]
+#[test]
+fn registering_another_runtimes_buffer_is_refused() {
+    let mut first = crate::Runtime::open(0, crate::Config::default()).unwrap();
+    let mut second = crate::Runtime::open(0, crate::Config::default()).unwrap();
+    let foreign = second.alloc_zeroed(64, 256).unwrap();
+    // SAFETY: the closure issues no CUDA call; it only asks to register another runtime's buffer.
+    let outcome = unsafe { first.with_raw(Vec::new(), |raw| raw.register(&foreign)) };
+    assert!(
+        matches!(outcome, Ok(Err(crate::Error::ForeignDomain))),
+        "expected a foreign-domain refusal, got {outcome:?}"
+    );
+    first.synchronize().unwrap();
+    second.synchronize().unwrap();
+}
