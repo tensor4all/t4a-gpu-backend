@@ -426,7 +426,7 @@ impl Runtime {
     }
 }
 
-fn validate_alignment(alignment: usize) -> Result<()> {
+pub(crate) fn validate_alignment(alignment: usize) -> Result<()> {
     if alignment == 0 || !alignment.is_power_of_two() {
         return Err(Error::invalid("alignment must be a non-zero power of two"));
     }

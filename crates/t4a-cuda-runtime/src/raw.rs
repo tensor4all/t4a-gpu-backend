@@ -9,11 +9,12 @@ use std::any::Any;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use cudarc::driver::result as drv;
 use cudarc::driver::sys;
 
 use crate::error::{Error, Result};
 use crate::kernel::{self, Arg, BoundFunction, LaunchConfig};
-use crate::memory::{check_span, Buffer, Domain};
+use crate::memory::{check_span, Alloc, Buffer, Domain};
 use crate::retirement::Admission;
 
 /// A resource registered for the duration of a raw scope.
@@ -70,6 +71,31 @@ impl RawScope<'_> {
             ));
         }
         Ok(pointer as u64)
+    }
+
+    /// Allocate `bytes` zero-filled bytes in this scope's domain.
+    ///
+    /// The allocation belongs to the domain, not to the scope: it lives until its last handle
+    /// drops, so a caller that keeps the returned buffer across the closure keeps it across the
+    /// closure's completion too.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] for a zero or non-power-of-two `alignment`, [`Error::OutOfMemory`],
+    /// and [`Error::Driver`] when the zero fill cannot be queued.
+    pub fn alloc_zeroed(&self, bytes: usize, alignment: usize) -> Result<Buffer> {
+        crate::runtime::validate_alignment(alignment)?;
+        let pointer = self.domain.allocate(bytes, alignment)?;
+        let alloc = Alloc::new(pointer, bytes, self.domain.clone());
+        let buffer = Buffer::from_parts(alloc, bytes, alignment);
+        if bytes > 0 {
+            let _scope = self.domain.scope()?;
+            // SAFETY: `pointer` addresses `bytes` writable bytes in this domain.
+            unsafe { drv::memset_d8_async(buffer.device_ptr(), 0, bytes, self.stream) }
+                .map_err(Error::driver("cuMemsetD8Async"))?;
+            self.domain.retirement().note_zero_fill();
+        }
+        Ok(buffer)
     }
 
     /// Register `buffer` with this scope and return its device pointer.

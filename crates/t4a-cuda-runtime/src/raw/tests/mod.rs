@@ -93,3 +93,26 @@ fn registering_another_runtimes_buffer_is_refused() {
     first.synchronize().unwrap();
     second.synchronize().unwrap();
 }
+
+#[cfg(feature = "gpu-tests")]
+#[test]
+fn a_scope_can_allocate_without_taking_the_runtime_back() {
+    let mut runtime = crate::Runtime::open(0, crate::Config::default()).unwrap();
+    // SAFETY: the closure allocates on this scope's stream and reads the pointer back.
+    let allocated = unsafe {
+        runtime
+            .with_raw(Vec::new(), |raw| {
+                let allocated = raw.alloc_zeroed(256, 256).unwrap();
+                // A fresh allocation becomes addressable by registering it, exactly like one the
+                // caller declared up front.
+                assert_eq!(
+                    raw.register(&allocated).unwrap(),
+                    raw.device_ptr(&allocated).unwrap()
+                );
+                raw.device_ptr(&allocated).unwrap()
+            })
+            .unwrap()
+    };
+    assert_ne!(allocated, 0);
+    runtime.synchronize().unwrap();
+}
