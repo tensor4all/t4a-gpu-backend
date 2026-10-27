@@ -47,12 +47,14 @@ impl Runtime {
         config.validate()?;
         let holder = ContextHolder::open(ordinal)?;
         let domain = Domain::create(holder, &config)?;
+        let mut artifacts =
+            ArtifactCache::new(config.artifact_cache_entries, config.artifact_cache_bytes);
+        if let Some(dir) = &config.artifact_cache_dir {
+            artifacts = artifacts.with_dir(dir);
+        }
         Ok(Self {
             ordinal,
-            artifacts: ArtifactCache::new(
-                config.artifact_cache_entries,
-                config.artifact_cache_bytes,
-            ),
+            artifacts,
             modules: ModuleCache::new(config.module_cache_entries, config.module_cache_bytes),
             config,
             domain: Some(domain),
