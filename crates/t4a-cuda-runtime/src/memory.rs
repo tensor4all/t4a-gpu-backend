@@ -35,6 +35,12 @@ pub struct Config {
     pub max_pending_records: usize,
     /// Maximum entries in the runtime's artifact cache.
     pub artifact_cache_entries: usize,
+    /// Directory that persists compiled kernel images across processes, or `None` for an
+    /// in-memory cache only.
+    ///
+    /// The directory is content-addressed (see [`crate::ArtifactCache::with_dir`]); a stale
+    /// file is dead weight, never a hazard, and removing it is the caller's to do.
+    pub artifact_cache_dir: Option<std::path::PathBuf>,
     /// Maximum estimated payload bytes in the artifact cache.
     pub artifact_cache_bytes: usize,
     /// Maximum entries in the runtime's module cache.
@@ -59,6 +65,7 @@ impl Default for Config {
             pending_host_budget: 256 << 20,
             max_pending_records: 1024,
             artifact_cache_entries: 64,
+            artifact_cache_dir: None,
             artifact_cache_bytes: 256 << 20,
             module_cache_entries: 64,
             module_cache_bytes: 256 << 20,

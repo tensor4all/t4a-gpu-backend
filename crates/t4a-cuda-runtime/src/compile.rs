@@ -7,6 +7,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::CString;
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 
 use cudarc::nvrtc::result as nvrtc;
 use cudarc::nvrtc::sys as nvrtc_sys;
@@ -381,6 +382,9 @@ pub struct ArtifactCache {
     misses: u64,
     attempts: u64,
     successes: u64,
+    dir: Option<PathBuf>,
+    disk_hits: u64,
+    disk_writes: u64,
 }
 
 impl ArtifactCache {
@@ -395,7 +399,42 @@ impl ArtifactCache {
             misses: 0,
             attempts: 0,
             successes: 0,
+            dir: None,
+            disk_hits: 0,
+            disk_writes: 0,
         }
+    }
+
+    /// Also persist compiled images in `dir`, so a later process reads them instead of
+    /// recompiling.
+    ///
+    /// The directory holds one file per translation unit, named
+    /// `v1-<source_id>-<128-bit digest>.<ptx|cubin>`. The digest covers everything that
+    /// determines the image (`source_id`, source, headers, options, architecture, output
+    /// kind and the NVRTC version), so editing one module's source invalidates that module
+    /// only; nothing global is in the key. Files are published by writing a temporary file
+    /// and renaming it, so a concurrent reader never sees a partial image, and a directory
+    /// that cannot be read or written is simply a cache miss. Removing stale files is the
+    /// caller's to do: the directory is content-addressed, so an old entry is dead weight,
+    /// not a hazard.
+    pub fn with_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.dir = Some(dir.into());
+        self
+    }
+
+    /// The persistent directory this cache reads and writes, if any.
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
+    }
+
+    /// Images served from the persistent directory instead of NVRTC.
+    pub fn disk_hits(&self) -> u64 {
+        self.disk_hits
+    }
+
+    /// Images published to the persistent directory.
+    pub fn disk_writes(&self) -> u64 {
+        self.disk_writes
     }
 
     /// Look up `request`, compiling and inserting it on a miss.
@@ -410,15 +449,61 @@ impl ArtifactCache {
             return Ok(std::sync::Arc::clone(&self.entries[index]));
         }
         self.misses += 1;
+        // A persistent image needs no NVRTC: this is the whole point of the directory.
+        if let Some(artifact) = self.read_dir(request, key) {
+            self.disk_hits += 1;
+            let artifact = std::sync::Arc::new(artifact);
+            self.insert(std::sync::Arc::clone(&artifact));
+            return Ok(artifact);
+        }
         let mut attempts = 0;
         let mut successes = 0;
         let compiled = compile_counted(request, &mut attempts, &mut successes);
         self.attempts += attempts;
         self.successes += successes;
         let compiled = compiled?;
+        self.write_dir(request, &compiled);
         let artifact = std::sync::Arc::new(compiled);
         self.insert(std::sync::Arc::clone(&artifact));
         Ok(artifact)
+    }
+
+    /// The image `request` produced earlier, read back from the persistent directory.
+    ///
+    /// A missing, unreadable or empty entry is a miss; a cache never fails a build.
+    fn read_dir(&mut self, request: &CompileRequest, key: CompileKey) -> Option<Artifact> {
+        let dir = self.dir.clone()?;
+        let path = dir.join(persistent_name(request)?);
+        let image = std::fs::read(&path).ok()?;
+        if image.is_empty() {
+            return None;
+        }
+        Some(Artifact {
+            key,
+            request: request.clone(),
+            image,
+            compiler_version: nvrtc_version().unwrap_or_default(),
+        })
+    }
+
+    /// Publish `artifact` into the persistent directory, best effort.
+    fn write_dir(&mut self, request: &CompileRequest, artifact: &Artifact) {
+        let Some(dir) = self.dir.clone() else {
+            return;
+        };
+        let Some(name) = persistent_name(request) else {
+            return;
+        };
+        let staged = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+        let published = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&staged, artifact.image()))
+            // Atomic within one filesystem: a reader sees the old entry or the whole image.
+            .and_then(|()| std::fs::rename(&staged, dir.join(&name)));
+        if published.is_ok() {
+            self.disk_writes += 1;
+        } else {
+            let _ = std::fs::remove_file(&staged);
+        }
     }
 
     fn insert(&mut self, artifact: std::sync::Arc<Artifact>) {
@@ -476,11 +561,97 @@ impl ArtifactCache {
         self.misses
     }
 
-    /// Drop every cached artifact.
+    /// Drop every artifact this process holds; a persistent directory is left alone.
     pub fn clear(&mut self) {
         self.entries.clear();
         self.bytes = 0;
     }
+}
+
+/// The persistent file name for `request`, or `None` when NVRTC is unavailable.
+///
+/// The name is `v1-<source-id>-<128-bit digest>.<ptx|cubin>`: the digest is the identity, the
+/// rest is for a human reading the directory. `v1-` changes only if the *stored form* changes,
+/// never because a kernel changed.
+fn persistent_name(request: &CompileRequest) -> Option<String> {
+    let compiler_version = nvrtc_version().ok()?;
+    let digest = persistent_digest(request, &compiler_version);
+    let label: String = request
+        .source_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(48)
+        .collect();
+    let extension = match request.output {
+        OutputKind::Ptx => "ptx",
+        OutputKind::Cubin => "cubin",
+    };
+    Some(format!("v1-{label}-{digest}.{extension}"))
+}
+
+/// 128-bit digest of everything that determines the image.
+///
+/// `DefaultHasher` is deliberately not reused: its algorithm is unspecified and may change
+/// between Rust releases, and a persistent key has to mean the same thing to a later process.
+/// Two FNV-1a lanes over a length-prefixed serialization, finished with a splitmix64 avalanche,
+/// keep the key stable and collision-free for practical purposes without a crypto dependency.
+fn persistent_digest(request: &CompileRequest, compiler_version: &str) -> String {
+    const OFFSETS: [u64; 2] = [0xcbf2_9ce4_8422_2325, 0x9e37_79b9_7f4a_7c15];
+    const PRIMES: [u64; 2] = [0x0000_0100_0000_01b3, 0x0000_0100_0000_01b5];
+    let mut state = OFFSETS;
+    {
+        let mut feed = |bytes: &[u8]| {
+            for (index, lane) in state.iter_mut().enumerate() {
+                // The length prefix is fed by the caller, so no two field lists can
+                // concatenate into the same stream.
+                let mut mix = |byte: u8| {
+                    *lane = (*lane ^ byte as u64).wrapping_mul(PRIMES[index]);
+                };
+                mix(index as u8);
+                for &byte in bytes {
+                    mix(byte);
+                }
+            }
+        };
+        let mut field = |bytes: &[u8]| {
+            feed(&(bytes.len() as u64).to_le_bytes());
+            feed(bytes);
+        };
+        field(request.source_id.as_bytes());
+        field(request.source.as_bytes());
+        field(&(request.headers.len() as u64).to_le_bytes());
+        for (name, body) in &request.headers {
+            field(name.as_bytes());
+            field(body.as_bytes());
+        }
+        field(&(request.options.len() as u64).to_le_bytes());
+        for option in &request.options {
+            field(option.as_bytes());
+        }
+        match &request.arch {
+            Some(arch) => {
+                field(b"arch");
+                field(arch.as_bytes());
+            }
+            None => field(b"no-arch"),
+        }
+        field(&[request.output as u8]);
+        field(compiler_version.as_bytes());
+    }
+    let avalache = |mut value: u64| {
+        value ^= value >> 30;
+        value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value ^= value >> 27;
+        value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    };
+    format!("{:016x}{:016x}", avalache(state[0]), avalache(state[1]))
 }
 
 #[cfg(test)]
