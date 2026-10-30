@@ -27,8 +27,8 @@ Validation status:
   direct-cudarc submission comparison measured over the same window. Completion events are amortised (one per
   seal, not per launch); the numbers are shared-host indicative, not a paired benchmark.
 
-Adoption by tenferro remains a separate, later maintainer decision: no backend switch, no kernel-catalog port and
-no CUDA Graph/NCCL/P2P work is part of this milestone.
+tenferro's CUDA backend runs on this runtime since tenferro 0.8 ([tenferro-rs#2208](https://github.com/tensor4all/tenferro-rs/issues/2208)).
+CUDA Graph, NCCL and P2P work is not part of this milestone.
 
 ## Boundaries
 
@@ -44,14 +44,14 @@ The foundational runtime does not depend on tenferro Tensor, graph, CPU-provider
 
 HIP/ROCm, Metal and Intel GPU implementations are future directions. Each can use its native execution model. Shared numerical specifications and tests should grow from concrete implementations; a universal runtime abstraction or kernel language is not a prerequisite.
 
-## Initial layout
+## Layout and releases
 
-The planned first workspace member is `crates/t4a-cuda-runtime/`. Only the CUDA milestone is in scope initially; placeholder crates for every future platform are unnecessary. Registry publication is deferred.
+The only workspace member is `crates/t4a-cuda-runtime/`, published on crates.io as [`t4a-cuda-runtime`](https://crates.io/crates/t4a-cuda-runtime). Only the CUDA milestone is in scope; placeholder crates for every future platform are unnecessary.
 
 ## Validation and adoption
 
 Standalone correctness tests will cover two independent runtimes on one physical GPU, real multi-GPU copies, allocation reuse, raw kernels, errors and teardown. Performance measurements distinguish submission, synchronization and transfer costs.
 
-The [tenferro adoption tracker](https://github.com/tensor4all/tenferro-rs/issues/2208) records evaluation and a later maintainer decision. Creating or implementing the standalone runtime does not itself switch tenferro's existing backend.
+The [tenferro adoption tracker](https://github.com/tensor4all/tenferro-rs/issues/2208) records the evaluation and the adoption decision.
 
 Development follows the applicable [tensor4all agent rules](https://github.com/tensor4all/tensor4all-agent-rules/blob/main/rules/index.md). Implementation should add the focused design, API documentation and tests described in the milestone issue.
