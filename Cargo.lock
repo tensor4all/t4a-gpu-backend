@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "t4a-cuda-runtime"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "cudarc",
  "thiserror",

@@ -5,6 +5,8 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/tensor4all/t4a-gpu-backend"
+authors = ["Hiroshi Shinaoka <h.shinaoka@gmail.com>", "tensor4all contributors"]
 rust-version = "1.75"
 
 [profile.release]
