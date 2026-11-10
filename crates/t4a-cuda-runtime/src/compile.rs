@@ -14,6 +14,13 @@ use cudarc::nvrtc::sys as nvrtc_sys;
 
 use crate::error::{Error, Result};
 
+mod dir;
+
+pub use dir::{
+    artifact_dir_stats, clear_artifact_dir, trim_artifact_dir, ArtifactDirStats,
+    DEFAULT_ARTIFACT_DIR_BYTES,
+};
+
 /// Output kind requested from NVRTC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutputKind {
@@ -383,8 +390,11 @@ pub struct ArtifactCache {
     attempts: u64,
     successes: u64,
     dir: Option<PathBuf>,
+    dir_max_bytes: u64,
     disk_hits: u64,
     disk_writes: u64,
+    dir_evictions: u64,
+    dir_evicted_bytes: u64,
 }
 
 impl ArtifactCache {
@@ -400,8 +410,11 @@ impl ArtifactCache {
             attempts: 0,
             successes: 0,
             dir: None,
+            dir_max_bytes: DEFAULT_ARTIFACT_DIR_BYTES,
             disk_hits: 0,
             disk_writes: 0,
+            dir_evictions: 0,
+            dir_evicted_bytes: 0,
         }
     }
 
@@ -414,12 +427,102 @@ impl ArtifactCache {
     /// kind and the NVRTC version), so editing one module's source invalidates that module
     /// only; nothing global is in the key. Files are published by writing a temporary file
     /// and renaming it, so a concurrent reader never sees a partial image, and a directory
-    /// that cannot be read or written is simply a cache miss. Removing stale files is the
-    /// caller's to do: the directory is content-addressed, so an old entry is dead weight,
-    /// not a hazard.
+    /// that cannot be read or written is simply a cache miss.
+    ///
+    /// The directory is bounded: at most [`DEFAULT_ARTIFACT_DIR_BYTES`] of images unless
+    /// [`ArtifactCache::with_dir_max_bytes`] says otherwise. Each publish drops the least
+    /// recently used images (by modification time, which a read refreshes) until the
+    /// directory fits, and counts them in [`ArtifactCache::dir_evictions`]. An image larger
+    /// than the whole bound is not published. Only files named as above are ever counted or
+    /// removed.
+    ///
+    /// The bound is enforced when an image is published, when the bound is lowered, and by
+    /// `trim_artifact_dir`; it is not enforced continuously. Attaching a directory
+    /// that already exceeds it does not trim it, so [`ArtifactCache::dir_stats`] can report
+    /// more than the bound until the next publish or trim. A read never trims: a hit only
+    /// refreshes that file's modification time.
     pub fn with_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.dir = Some(dir.into());
         self
+    }
+
+    /// Bound the persistent directory to `max_bytes` of images instead of
+    /// [`DEFAULT_ARTIFACT_DIR_BYTES`]. `0` keeps reading existing images but publishes none.
+    pub fn with_dir_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.dir_max_bytes = max_bytes;
+        self
+    }
+
+    /// Change the persistent directory's bound and trim it to the new bound now.
+    ///
+    /// Trimming is best effort, like every directory operation; what it dropped is counted in
+    /// [`ArtifactCache::dir_evictions`] and [`ArtifactCache::dir_evicted_bytes`].
+    pub fn set_dir_max_bytes(&mut self, max_bytes: u64) {
+        self.dir_max_bytes = max_bytes;
+        self.trim_dir(None);
+    }
+
+    /// The bound on the persistent directory's images, in bytes.
+    pub fn dir_max_bytes(&self) -> u64 {
+        self.dir_max_bytes
+    }
+
+    /// Images and bytes the persistent directory holds now; empty without a directory.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error from listing a directory that exists but cannot be read.
+    pub fn dir_stats(&self) -> std::io::Result<ArtifactDirStats> {
+        match &self.dir {
+            Some(dir) => artifact_dir_stats(dir),
+            None => Ok(ArtifactDirStats::default()),
+        }
+    }
+
+    /// Remove every image from the persistent directory and return what was removed.
+    ///
+    /// The in-memory entries are untouched; [`ArtifactCache::clear`] drops those.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error from listing the directory or removing an entry.
+    pub fn clear_dir(&mut self) -> std::io::Result<ArtifactDirStats> {
+        match &self.dir {
+            Some(dir) => clear_artifact_dir(dir),
+            None => Ok(ArtifactDirStats::default()),
+        }
+    }
+
+    /// Images this cache removed from the persistent directory to stay within its bound.
+    pub fn dir_evictions(&self) -> u64 {
+        self.dir_evictions
+    }
+
+    /// Bytes of the images counted by [`ArtifactCache::dir_evictions`].
+    pub fn dir_evicted_bytes(&self) -> u64 {
+        self.dir_evicted_bytes
+    }
+
+    /// Trim the persistent directory to its bound, sparing `keep`, and count what went.
+    fn trim_dir(&mut self, keep: Option<&Path>) {
+        self.trim_dir_with(keep, dir::remove);
+    }
+
+    /// [`ArtifactCache::trim_dir`] with the removal injected, so a test can make it fail.
+    fn trim_dir_with(
+        &mut self,
+        keep: Option<&Path>,
+        remove: impl FnMut(&Path) -> std::io::Result<bool>,
+    ) {
+        let Some(dir) = &self.dir else {
+            return;
+        };
+        let mut evicted = ArtifactDirStats::default();
+        // Best effort: a trim that fails part way still counts what it removed before, since
+        // `trim_into` adds each image to `evicted` as soon as it is gone.
+        let _ = dir::trim_into(dir, self.dir_max_bytes, keep, &mut evicted, remove);
+        self.dir_evictions += evicted.entries as u64;
+        self.dir_evicted_bytes += evicted.bytes;
     }
 
     /// The persistent directory this cache reads and writes, if any.
@@ -478,6 +581,8 @@ impl ArtifactCache {
         if image.is_empty() {
             return None;
         }
+        // A use, so least-recently-used eviction keeps this image.
+        dir::touch(&path);
         Some(Artifact {
             key,
             request: request.clone(),
@@ -494,6 +599,10 @@ impl ArtifactCache {
         let Some(name) = persistent_name(request) else {
             return;
         };
+        // An image larger than the whole bound would evict everything and then itself.
+        if artifact.image().len() as u64 > self.dir_max_bytes {
+            return;
+        }
         let staged = dir.join(format!(".{name}.{}.tmp", std::process::id()));
         let published = std::fs::create_dir_all(&dir)
             .and_then(|()| std::fs::write(&staged, artifact.image()))
@@ -501,6 +610,7 @@ impl ArtifactCache {
             .and_then(|()| std::fs::rename(&staged, dir.join(&name)));
         if published.is_ok() {
             self.disk_writes += 1;
+            self.trim_dir(Some(&dir.join(&name)));
         } else {
             let _ = std::fs::remove_file(&staged);
         }

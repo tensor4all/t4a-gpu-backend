@@ -267,3 +267,190 @@ fn a_cache_without_a_directory_never_touches_the_filesystem() {
     assert_eq!(cache.disk_hits(), 0);
     assert_eq!(cache.disk_writes(), 0);
 }
+
+// Bounded persistent directory (tensor4all/tenferro-rs#2475). These tests write fake cache
+// files directly, so they need neither NVRTC nor a device.
+
+/// Publish a fake image named like a real entry, last used `age_secs` ago.
+fn plant(dir: &std::path::Path, label: &str, bytes: usize, age_secs: u64) -> std::path::PathBuf {
+    std::fs::create_dir_all(dir).expect("directory");
+    let path = dir.join(format!("v1-{label}-{:032x}.ptx", label.len()));
+    std::fs::write(&path, vec![b'x'; bytes]).expect("image");
+    let used = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .and_then(|file| file.set_modified(used))
+        .expect("mtime");
+    path
+}
+
+#[test]
+fn a_persistent_directory_has_a_finite_default_bound() {
+    let cache = ArtifactCache::new(4, 1 << 20).with_dir("/nonexistent/t4a-artifacts");
+    assert_eq!(cache.dir_max_bytes(), DEFAULT_ARTIFACT_DIR_BYTES);
+    assert_eq!(DEFAULT_ARTIFACT_DIR_BYTES, 256 << 20);
+    let cache = cache.with_dir_max_bytes(1 << 10);
+    assert_eq!(
+        cache.dir_max_bytes(),
+        1 << 10,
+        "the caller overrides the bound"
+    );
+}
+
+#[test]
+fn introspection_reports_entries_and_bytes_of_cache_files_only() {
+    let scratch = ScratchDir::new("stats");
+    plant(scratch.path(), "a", 100, 30);
+    plant(scratch.path(), "bb", 250, 20);
+    // Not ours: a file the cache did not name is neither counted nor touched.
+    std::fs::write(scratch.path().join("notes.txt"), b"keep me").expect("foreign file");
+
+    let stats = artifact_dir_stats(scratch.path()).expect("stats");
+    assert_eq!((stats.entries, stats.bytes), (2, 350));
+
+    let cache = ArtifactCache::new(4, 1 << 20).with_dir(scratch.path());
+    let stats = cache.dir_stats().expect("stats");
+    assert_eq!((stats.entries, stats.bytes), (2, 350));
+
+    // A directory that does not exist yet holds nothing; it is not an error.
+    let missing = artifact_dir_stats(&scratch.path().join("absent")).expect("missing dir");
+    assert_eq!((missing.entries, missing.bytes), (0, 0));
+}
+
+#[test]
+fn crossing_the_bound_drops_the_least_recently_used_entries_first() {
+    let scratch = ScratchDir::new("trim");
+    let oldest = plant(scratch.path(), "a", 100, 300);
+    let middle = plant(scratch.path(), "bb", 100, 200);
+    let newest = plant(scratch.path(), "ccc", 100, 100);
+
+    let evicted = trim_artifact_dir(scratch.path(), 250).expect("trim");
+    assert_eq!(
+        (evicted.entries, evicted.bytes),
+        (1, 100),
+        "one entry over the bound"
+    );
+    assert!(!oldest.exists(), "the least recently used entry goes first");
+    assert!(middle.exists() && newest.exists());
+
+    let stats = artifact_dir_stats(scratch.path()).expect("stats");
+    assert_eq!((stats.entries, stats.bytes), (2, 200));
+    assert!(stats.bytes <= 250);
+}
+
+#[test]
+fn lowering_the_bound_trims_now_and_counts_what_it_dropped() {
+    let scratch = ScratchDir::new("set-bound");
+    plant(scratch.path(), "a", 100, 300);
+    plant(scratch.path(), "bb", 100, 200);
+    let kept = plant(scratch.path(), "ccc", 100, 100);
+
+    let mut cache = ArtifactCache::new(4, 1 << 20).with_dir(scratch.path());
+    assert_eq!(cache.dir_evictions(), 0);
+    cache.set_dir_max_bytes(150);
+    assert_eq!(
+        cache.dir_evictions(),
+        2,
+        "evictions are counted, not silent"
+    );
+    assert_eq!(cache.dir_evicted_bytes(), 200);
+    assert!(kept.exists(), "the most recently used entry survives");
+    let stats = cache.dir_stats().expect("stats");
+    assert_eq!((stats.entries, stats.bytes), (1, 100));
+}
+
+#[test]
+fn a_trim_that_fails_part_way_still_counts_what_it_removed() {
+    // The shape of a sticky shared directory: the older image is ours and goes, the newer
+    // one belongs to another user and its removal is refused.
+    let scratch = ScratchDir::new("partial-trim");
+    let ours = plant(scratch.path(), "a", 100, 200);
+    let theirs = plant(scratch.path(), "bb", 100, 100);
+
+    let mut cache = ArtifactCache::new(4, 1 << 20).with_dir(scratch.path());
+    cache.dir_max_bytes = 0;
+    cache.trim_dir_with(None, |path| {
+        if path == theirs.as_path() {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        } else {
+            dir::remove(path)
+        }
+    });
+
+    assert!(!ours.exists(), "the removable image went");
+    assert!(theirs.exists(), "the refused image stayed");
+    assert_eq!(
+        (cache.dir_evictions(), cache.dir_evicted_bytes()),
+        (1, 100),
+        "the image removed before the failure is counted"
+    );
+}
+
+#[test]
+fn clear_empties_the_directory_of_cache_files_and_leaves_the_rest() {
+    let scratch = ScratchDir::new("clear");
+    plant(scratch.path(), "a", 100, 30);
+    plant(scratch.path(), "bb", 250, 20);
+    // A staging file a crashed writer left behind is ours too.
+    std::fs::write(scratch.path().join(".v1-a-0.ptx.4242.tmp"), b"partial").expect("staging");
+    std::fs::write(scratch.path().join("notes.txt"), b"keep me").expect("foreign file");
+
+    let mut cache = ArtifactCache::new(4, 1 << 20).with_dir(scratch.path());
+    let removed = cache.clear_dir().expect("clear");
+    assert_eq!((removed.entries, removed.bytes), (2, 350));
+
+    let stats = cache.dir_stats().expect("stats");
+    assert_eq!((stats.entries, stats.bytes), (0, 0));
+    assert!(!scratch.path().join(".v1-a-0.ptx.4242.tmp").exists());
+    assert!(
+        scratch.path().join("notes.txt").exists(),
+        "a foreign file is never removed"
+    );
+
+    // The free function is the same operation for a caller without a cache.
+    plant(scratch.path(), "c", 10, 1);
+    let removed = clear_artifact_dir(scratch.path()).expect("clear");
+    assert_eq!((removed.entries, removed.bytes), (1, 10));
+    assert_eq!(
+        artifact_dir_stats(scratch.path()).expect("stats").entries,
+        0
+    );
+}
+
+#[test]
+fn a_cache_without_a_directory_reports_an_empty_directory() {
+    let mut cache = ArtifactCache::new(4, 1 << 20);
+    let stats = cache.dir_stats().expect("stats");
+    assert_eq!((stats.entries, stats.bytes), (0, 0));
+    let removed = cache.clear_dir().expect("clear");
+    assert_eq!((removed.entries, removed.bytes), (0, 0));
+}
+
+#[cfg(feature = "gpu-tests")]
+#[test]
+fn a_publish_over_the_bound_evicts_the_least_recently_used_image() {
+    let scratch = ScratchDir::new("publish-trim");
+    let stale = plant(scratch.path(), "stale", 4096, 3600);
+    let request = request();
+    let image_bytes = compile(&request).expect("compile").image().len() as u64;
+
+    // Room for the new image but not for both.
+    let mut cache = ArtifactCache::new(4, 1 << 20)
+        .with_dir(scratch.path())
+        .with_dir_max_bytes(image_bytes + 1);
+    cache.get_or_compile(&request).expect("compile");
+    assert_eq!(cache.disk_writes(), 1);
+    assert!(!stale.exists(), "the older image made room");
+    assert_eq!(cache.dir_evictions(), 1);
+    assert_eq!(cache.dir_evicted_bytes(), 4096);
+    let stats = cache.dir_stats().expect("stats");
+    assert_eq!((stats.entries, stats.bytes), (1, image_bytes));
+
+    // An image larger than the whole bound is served but not published.
+    let mut tiny = ArtifactCache::new(4, 1 << 20)
+        .with_dir(scratch.path().join("tiny"))
+        .with_dir_max_bytes(1);
+    tiny.get_or_compile(&request).expect("compile");
+    assert_eq!(tiny.disk_writes(), 0);
+}

@@ -50,7 +50,9 @@ mod runtime;
 mod transfer;
 
 pub use compile::{
-    compile, nvrtc_version, Artifact, ArtifactCache, CompileKey, CompileRequest, OutputKind,
+    artifact_dir_stats, clear_artifact_dir, compile, nvrtc_version, trim_artifact_dir, Artifact,
+    ArtifactCache, ArtifactDirStats, CompileKey, CompileRequest, OutputKind,
+    DEFAULT_ARTIFACT_DIR_BYTES,
 };
 pub use context::{device_count, device_name, max_kernel_parameter_bytes, supports_memory_pool};
 pub use error::{Error, Result};
