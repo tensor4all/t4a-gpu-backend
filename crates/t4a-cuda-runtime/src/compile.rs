@@ -435,6 +435,12 @@ impl ArtifactCache {
     /// directory fits, and counts them in [`ArtifactCache::dir_evictions`]. An image larger
     /// than the whole bound is not published. Only files named as above are ever counted or
     /// removed.
+    ///
+    /// The bound is enforced when an image is published, when the bound is lowered, and by
+    /// `trim_artifact_dir`; it is not enforced continuously. Attaching a directory
+    /// that already exceeds it does not trim it, so [`ArtifactCache::dir_stats`] can report
+    /// more than the bound until the next publish or trim. A read never trims: a hit only
+    /// refreshes that file's modification time.
     pub fn with_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.dir = Some(dir.into());
         self
