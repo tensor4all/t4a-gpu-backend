@@ -297,6 +297,40 @@ impl Runtime {
         self.artifacts.misses()
     }
 
+    /// Bound this runtime's persistent artifact directory to `max_bytes` of images and trim it
+    /// now. Without a directory the bound is recorded and nothing else happens.
+    pub fn set_artifact_dir_max_bytes(&mut self, max_bytes: u64) {
+        self.artifacts.set_dir_max_bytes(max_bytes);
+    }
+
+    /// The bound on this runtime's persistent artifact directory, in bytes.
+    pub fn artifact_dir_max_bytes(&self) -> u64 {
+        self.artifacts.dir_max_bytes()
+    }
+
+    /// Images and bytes in this runtime's persistent artifact directory; empty without one.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error from listing a directory that exists but cannot be read.
+    pub fn artifact_dir_stats(&self) -> std::io::Result<crate::ArtifactDirStats> {
+        self.artifacts.dir_stats()
+    }
+
+    /// Remove every image from this runtime's persistent artifact directory.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error from listing the directory or removing an entry.
+    pub fn clear_artifact_dir(&mut self) -> std::io::Result<crate::ArtifactDirStats> {
+        self.artifacts.clear_dir()
+    }
+
+    /// Images this runtime evicted from its persistent artifact directory to stay bounded.
+    pub fn artifact_dir_evictions(&self) -> u64 {
+        self.artifacts.dir_evictions()
+    }
+
     /// Actual NVRTC compilation attempts made for this runtime.
     pub fn compile_attempts(&self) -> u64 {
         self.artifacts.compile_attempts()
