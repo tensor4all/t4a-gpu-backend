@@ -96,7 +96,7 @@ fn scan(dir: &Path) -> io::Result<(Vec<Entry>, Vec<Entry>)> {
 }
 
 /// Remove `path`; one that is already gone counts as removed by someone else, not by us.
-fn remove(path: &Path) -> io::Result<bool> {
+pub(super) fn remove(path: &Path) -> io::Result<bool> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -138,6 +138,20 @@ pub(super) fn trim_except(
     max_bytes: u64,
     keep: Option<&Path>,
 ) -> io::Result<ArtifactDirStats> {
+    let mut evicted = ArtifactDirStats::default();
+    trim_into(dir, max_bytes, keep, &mut evicted, remove)?;
+    Ok(evicted)
+}
+
+/// [`trim_except`] with the removal injected, adding each image to `evicted` as soon as it
+/// is gone, so a trim that fails part way still leaves in `evicted` what it removed before.
+pub(super) fn trim_into(
+    dir: &Path,
+    max_bytes: u64,
+    keep: Option<&Path>,
+    evicted: &mut ArtifactDirStats,
+    mut remove: impl FnMut(&Path) -> io::Result<bool>,
+) -> io::Result<()> {
     let (mut images, staging) = scan(dir)?;
     let now = SystemTime::now();
     for stale in staging {
@@ -146,9 +160,8 @@ pub(super) fn trim_except(
         }
     }
     let mut held: u64 = images.iter().map(|image| image.bytes).sum();
-    let mut evicted = ArtifactDirStats::default();
     if held <= max_bytes {
-        return Ok(evicted);
+        return Ok(());
     }
     // Oldest use first; equal times fall back to the name so the order is deterministic.
     images.sort_by(|a, b| a.used.cmp(&b.used).then_with(|| a.path.cmp(&b.path)));
@@ -164,7 +177,7 @@ pub(super) fn trim_except(
         }
         held = held.saturating_sub(image.bytes);
     }
-    Ok(evicted)
+    Ok(())
 }
 
 /// Remove every image and staging file from a persistent artifact directory.

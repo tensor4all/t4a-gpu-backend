@@ -361,6 +361,33 @@ fn lowering_the_bound_trims_now_and_counts_what_it_dropped() {
 }
 
 #[test]
+fn a_trim_that_fails_part_way_still_counts_what_it_removed() {
+    // The shape of a sticky shared directory: the older image is ours and goes, the newer
+    // one belongs to another user and its removal is refused.
+    let scratch = ScratchDir::new("partial-trim");
+    let ours = plant(scratch.path(), "a", 100, 200);
+    let theirs = plant(scratch.path(), "bb", 100, 100);
+
+    let mut cache = ArtifactCache::new(4, 1 << 20).with_dir(scratch.path());
+    cache.dir_max_bytes = 0;
+    cache.trim_dir_with(None, |path| {
+        if path == theirs.as_path() {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        } else {
+            dir::remove(path)
+        }
+    });
+
+    assert!(!ours.exists(), "the removable image went");
+    assert!(theirs.exists(), "the refused image stayed");
+    assert_eq!(
+        (cache.dir_evictions(), cache.dir_evicted_bytes()),
+        (1, 100),
+        "the image removed before the failure is counted"
+    );
+}
+
+#[test]
 fn clear_empties_the_directory_of_cache_files_and_leaves_the_rest() {
     let scratch = ScratchDir::new("clear");
     plant(scratch.path(), "a", 100, 30);

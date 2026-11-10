@@ -499,14 +499,24 @@ impl ArtifactCache {
 
     /// Trim the persistent directory to its bound, sparing `keep`, and count what went.
     fn trim_dir(&mut self, keep: Option<&Path>) {
+        self.trim_dir_with(keep, dir::remove);
+    }
+
+    /// [`ArtifactCache::trim_dir`] with the removal injected, so a test can make it fail.
+    fn trim_dir_with(
+        &mut self,
+        keep: Option<&Path>,
+        remove: impl FnMut(&Path) -> std::io::Result<bool>,
+    ) {
         let Some(dir) = &self.dir else {
             return;
         };
-        // Best effort: a trim that fails part way still counts what it removed before.
-        if let Ok(evicted) = dir::trim_except(dir, self.dir_max_bytes, keep) {
-            self.dir_evictions += evicted.entries as u64;
-            self.dir_evicted_bytes += evicted.bytes;
-        }
+        let mut evicted = ArtifactDirStats::default();
+        // Best effort: a trim that fails part way still counts what it removed before, since
+        // `trim_into` adds each image to `evicted` as soon as it is gone.
+        let _ = dir::trim_into(dir, self.dir_max_bytes, keep, &mut evicted, remove);
+        self.dir_evictions += evicted.entries as u64;
+        self.dir_evicted_bytes += evicted.bytes;
     }
 
     /// The persistent directory this cache reads and writes, if any.
