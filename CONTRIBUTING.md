@@ -16,7 +16,7 @@ This file only records what is specific to `t4a-gpu-backend`:
   compiles the `gpu-tests` targets that need a real CUDA device. The `gpu-tests` suite is executed on a self-hosted GPU
   host, never in the hosted job; an invoked hardware test on a host without a device fails rather than skipping.
 - **Platforms claimed**: `ubuntu-latest` for the single `host` job (fmt, clippy, tests, rustdoc). No macOS or Windows
-  job exists. CUDA device tests run on the self-hosted GPU host configured in that job.
+  job exists. That job does not run the CUDA device tests: `.github/workflows/ci.yml:27-28` only records that they need a real device and run on a self-hosted GPU host, and no workflow here configures such a runner.
 - **Local gate**: `cargo test --workspace`.
 
 ## Anything here that departs from the shared rules
