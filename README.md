@@ -27,6 +27,17 @@ Validation status:
   direct-cudarc submission comparison measured over the same window. Completion events are amortised (one per
   seal, not per launch); the numbers are shared-host indicative, not a paired benchmark.
 
+`crates/t4a-metal-runtime/` implements the Metal side: one device and one command queue per runtime, shared-mode
+buffers with no transfer surface, MSL compiled at run time with bounded per-runtime artifact and pipeline caches,
+checked launches with by-value parameters, submission through one shared event per command buffer, and a raw
+consumer seam. Validation status for it:
+
+- `cargo fmt`, `cargo clippy -D warnings`, `cargo test` (no device needed), doctests and `cargo doc` pass on macOS.
+- The `metal-tests` suite (23 hardware tests) passes on an Apple M5 Max (macOS 26.7.2, Metal 4); `otool -L` on that test binary shows
+  no Metal, MetalPerformanceShaders or Accelerate entry, which is how "no build-time link" is checked.
+- Off Apple the crates compile with the loader returning a typed `Unavailable`; no macOS CI job exists yet, so the
+  evidence is local.
+
 tenferro's CUDA backend runs on this runtime since tenferro 0.8 ([tenferro-rs#2208](https://github.com/tensor4all/tenferro-rs/issues/2208)).
 CUDA Graph, NCCL and P2P work is not part of this milestone.
 
@@ -42,11 +53,18 @@ The CUDA runtime provides:
 
 The foundational runtime does not depend on tenferro Tensor, graph, CPU-provider or AD crates, or on CubeCL/CubeK. Tensor semantics, graph placement and differentiation stay in consumers. Reusable native CUDA kernels live in the separate [t4a-cuda-kernels repository](https://github.com/tensor4all/t4a-cuda-kernels), with its [migration design](https://github.com/tensor4all/t4a-cuda-kernels/blob/main/docs/design/cubecl-kernel-port.md). That kernel crate does not depend on t4a-cuda-runtime; consumers can combine either project with their own CUDA infrastructure. Vendor adapters can be developed separately without moving Tensor semantics into the runtime.
 
-HIP/ROCm, Metal and Intel GPU implementations are future directions. Each can use its native execution model. Shared numerical specifications and tests should grow from concrete implementations; a universal runtime abstraction or kernel language is not a prerequisite.
+The Apple GPU runtime lives here too: [`crates/t4a-metal-sys`](crates/t4a-metal-sys/README.md) and
+[`crates/t4a-metal-runtime`](crates/t4a-metal-runtime/README.md) are the runtime layer of
+[tenferro-rs#2402](https://github.com/tensor4all/tenferro-rs/issues/2402), with the mechanisms and the measured
+capability dump in the [detailed design](docs/design/metal-runtime.md).
+
+HIP/ROCm and Intel GPU implementations are future directions. Each runtime can use its native execution model.
+Shared numerical specifications and tests should grow from concrete implementations; a universal runtime
+abstraction or kernel language is not a prerequisite.
 
 ## Layout and releases
 
-The only workspace member is `crates/t4a-cuda-runtime/`, published on crates.io as [`t4a-cuda-runtime`](https://crates.io/crates/t4a-cuda-runtime). Only the CUDA milestone is in scope; placeholder crates for every future platform are unnecessary.
+The workspace members are `crates/t4a-cuda-runtime/` (published on crates.io as [`t4a-cuda-runtime`](https://crates.io/crates/t4a-cuda-runtime)) and, for the Apple GPU runtime, [crates/t4a-metal-sys](crates/t4a-metal-sys/README.md) and [crates/t4a-metal-runtime](crates/t4a-metal-runtime/README.md), neither of which is published. Placeholder crates for future platforms are unnecessary.
 
 ## Validation and adoption
 

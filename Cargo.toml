@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/t4a-cuda-runtime"]
+members = ["crates/t4a-cuda-runtime", "crates/t4a-metal-sys", "crates/t4a-metal-runtime"]
 resolver = "2"
 
 [workspace.package]

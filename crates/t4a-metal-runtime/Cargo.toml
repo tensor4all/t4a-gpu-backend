@@ -1,0 +1,32 @@
+[package]
+name = "t4a-metal-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Standalone Metal execution runtime (one device, one queue, shared buffers, run-time compiled MSL and checked launches) for tensor4all"
+readme = "README.md"
+keywords = ["metal", "apple", "gpu", "tensor4all"]
+categories = ["hardware-support", "science"]
+
+[features]
+default = []
+# Selects tests that require a real Apple GPU. An invoked hardware test on a host
+# without a usable device fails; it never silently passes.
+metal-tests = []
+
+[dependencies]
+t4a-metal-sys = { path = "../t4a-metal-sys" }
+sha2 = "0.10"
+thiserror = "2"
+
+[[test]]
+name = "host_contract"
+path = "tests/host_contract.rs"
+
+[[test]]
+name = "metal_single"
+path = "tests/metal_single.rs"
+required-features = ["metal-tests"]
