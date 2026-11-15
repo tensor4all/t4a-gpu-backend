@@ -231,6 +231,16 @@ runtime uses where the semantics match: `ForeignDomain`, `Closed`, `InvalidArgum
 because Metal is missing; the non-Apple build compiles the same surface with the loader
 path returning `Unavailable`.
 
+## 8a. Thread safety (0.1.1)
+
+`ContextHolder`, `Allocation`, `Artifact`, `PipelineState` and `Submission` are declared
+`Send + Sync`, and `Runtime` is declared `Send` (`the_runtime_can_move_between_threads`).
+Encoding uses `&mut self`, so one command buffer is never reached by two threads at once,
+and a consumer may keep the runtime behind a mutex — which tenferro's shared allocation
+domain needs, because its `allocate` takes `&self` while `Runtime::alloc_zeroed` takes
+`&mut self`. `Runtime` is not `Sync`: it is moved, not shared, and the consumer's mutex
+supplies the sharing.
+
 ## 9. Name mapping to `t4a-cuda-runtime`
 
 | CUDA runtime | Metal runtime | Note |
