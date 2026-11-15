@@ -82,3 +82,17 @@ fn probe_labels_are_distinct_so_a_report_can_name_them() {
     assert_eq!(labels.len(), count, "probe labels are unique");
     assert!(labels.contains(&"f64"), "the rejected dtype is probed too");
 }
+
+/// tenferro's shared allocation domain allocates from `&self`, so a consumer holds one
+/// runtime behind a mutex and needs `Runtime: Send` for that. The claim is restated here
+/// so a future field that is not thread-safe fails a test rather than a consumer's build.
+#[test]
+fn the_runtime_can_move_between_threads() {
+    fn assert_send<T: Send>() {}
+    // The consumer's shape: one runtime owned by a mutex inside an `Arc`.
+    fn assert_shareable<T: Send + 'static>() {
+        let _ = std::sync::Arc::new(std::sync::Mutex::new(None::<T>));
+    }
+    assert_send::<Runtime>();
+    assert_shareable::<Runtime>();
+}
