@@ -1,6 +1,6 @@
 [package]
 name = "t4a-metal-runtime"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -18,7 +18,7 @@ default = []
 metal-tests = []
 
 [dependencies]
-t4a-metal-sys = { path = "../t4a-metal-sys" }
+t4a-metal-sys = { path = "../t4a-metal-sys", version = "=0.1.0" }
 sha2 = "0.10"
 thiserror = "2"
 
