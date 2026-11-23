@@ -138,6 +138,14 @@ struct Counters {
     submissions: u64,
 }
 
+// SAFETY: every object the runtime owns is an Apple handle the crate already declares
+// thread-safe (`ContextHolder`, `Allocation`, `Artifact`, `PipelineState`, `Submission`),
+// and encoding uses `&mut self`, so no two threads reach one command buffer at once. A
+// caller that moves the runtime between threads therefore never shares one submission
+// encoder. This is what lets a consumer put a runtime behind a mutex and allocate from
+// `&self` — tenferro's shared allocation domain has exactly that shape.
+unsafe impl Send for Runtime {}
+
 struct CacheEntry {
     source_hash: String,
     entry: String,
