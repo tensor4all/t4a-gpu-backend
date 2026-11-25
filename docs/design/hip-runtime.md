@@ -108,7 +108,11 @@ evo2 is the one that runs on a hosted runner.
   starting value after the free (`tests/runtime_pool.rs`), so a high-water mark would
   fail. Before every call the seam runs rocBLAS's
   size query (`rocblas_{start,stop}_device_memory_size_query`) on the same arguments and
-  hands over a larger pool buffer if needed. The replaced buffer's free is ordered
+  hands over a larger pool buffer if needed. `rocblas_is_managing_device_memory` is
+  re-checked before and after every call, and a handle that reports managing its own
+  memory again is refused before it can allocate outside the pool
+  (`a_handle_that_manages_its_own_memory_again_is_refused_before_the_call`). The replaced
+  buffer's free is ordered
   after the calls that used it. On gfx1151 every GEMM in the test suite queried 0 bytes
   (each case logs `largest workspace query so far`, and asserts the pool buffer covers
   it). rocSOLVER's `dgetrf` queries 0 bytes up to n = 64 and 790,784 bytes at

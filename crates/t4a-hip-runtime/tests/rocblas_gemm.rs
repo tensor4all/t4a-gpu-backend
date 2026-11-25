@@ -537,3 +537,40 @@ fn a_nan_result_fails_the_bound_instead_of_vanishing() {
         );
     }
 }
+
+#[test]
+fn a_handle_that_manages_its_own_memory_again_is_refused_before_the_call() {
+    // Review round 4 of #19: pool ownership is checked before and after every call, not
+    // only at creation. Hand memory back to rocBLAS and the next call must be refused
+    // before rocBLAS can allocate outside the pool.
+    let Some((mut runtime, mut blas)) = setup() else {
+        return;
+    };
+    let a = runtime.alloc_zeroed(8).expect("a");
+    let b = runtime.alloc_zeroed(8).expect("b");
+    let c = runtime.alloc_zeroed(8).expect("c");
+    let request = GemmRequest {
+        dtype: DType::F64,
+        a: &a,
+        trans_a: false,
+        b: &b,
+        trans_b: false,
+        c: &c,
+        shape: (1, 1, 1),
+        leading: (1, 1, 1),
+        batches: (1, 0, 0, 0),
+    };
+    blas.gemm(&mut runtime, &request)
+        .expect("a pool-owned handle runs");
+    blas.return_memory_to_rocblas_for_test();
+    assert!(blas.manages_own_memory());
+    match blas.gemm(&mut runtime, &request) {
+        Err(SeamError::Unavailable { detail }) => {
+            assert!(
+                detail.contains("manages device memory of its own"),
+                "{detail}"
+            )
+        }
+        other => panic!("a rocBLAS-managed handle must be refused, got {other:?}"),
+    }
+}

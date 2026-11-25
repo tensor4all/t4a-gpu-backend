@@ -8,8 +8,9 @@
 //! into `tenferro-gpu/src/rocm/`. Stage 1 proves that the runtime's ownership contract
 //! carries a vendor library:
 //!
-//! - the handle is created on the runtime's device, bound to the runtime's stream, and
-//!   both bindings are read back;
+//! - the handle is created inside a raw scope, which makes the runtime's device current,
+//!   and bound to the runtime's stream; the stream binding and the pointer mode are read
+//!   back (`rocblas_get_stream`, `rocblas_get_pointer_mode`);
 //! - **pointer classes are explicit**: GEMM coefficients are host scalars, so the handle's
 //!   pointer mode is set to host and re-read before every call; rocSOLVER's `info` and
 //!   `ipiv` are device pointers, so the typed entry only takes runtime buffers and the
@@ -17,7 +18,9 @@
 //! - **workspace is pool-owned**: the handle gets a pool buffer at creation (which makes
 //!   rocBLAS free the 32 MiB it allocates for itself), every call's workspace is
 //!   measured with rocBLAS's size query first, and a larger need is met by a new pool
-//!   buffer. rocBLAS never allocates device memory of its own after `new`.
+//!   buffer. `rocblas_is_managing_device_memory` is checked before and after every call:
+//!   a handle that ever reports managing its own memory again is refused, so no call runs
+//!   with memory the pool cannot account for.
 
 #![allow(dead_code)]
 
@@ -270,6 +273,14 @@ impl Rocblas {
         library_memory(self.blas, self.handle)
     }
 
+    /// Hand device-memory management back to rocBLAS (`rocblas_set_workspace(null, 0)`),
+    /// for the test that checks the seam then refuses the handle.
+    pub fn return_memory_to_rocblas_for_test(&mut self) {
+        // SAFETY: the handle is live; null and zero switch it back to rocBLAS-managed
+        // memory, which is the state under test.
+        unsafe { (self.blas.set_workspace)(self.handle, std::ptr::null_mut(), 0) };
+    }
+
     /// The largest workspace, in bytes, that rocBLAS's size query reported for any call
     /// made through this handle.
     pub fn largest_query_bytes(&self) -> usize {
@@ -443,6 +454,7 @@ impl Rocblas {
                 let needed = ensure_workspace(blas, handle, raw, workspace, &invoke)?;
                 *largest_query = (*largest_query).max(needed);
                 let status = invoke();
+                ensure_pool_owned(blas, handle)?;
                 if status != ROCBLAS_STATUS_SUCCESS {
                     return Err(SeamError::unsupported(
                         "gemm",
@@ -549,6 +561,7 @@ impl Rocblas {
         let needed = ensure_workspace(self.blas, handle, raw, &mut self.workspace, &invoke)?;
         self.largest_query = self.largest_query.max(needed);
         let status = invoke();
+        ensure_pool_owned(self.blas, handle)?;
         if status != ROCBLAS_STATUS_SUCCESS {
             return Err(SeamError::unsupported(
                 "getrf",
@@ -643,6 +656,20 @@ fn library_memory(blas: &'static RocblasTable, handle: RocblasHandle) -> Library
     }
 }
 
+/// Refuse a handle on which rocBLAS manages device memory of its own: such memory is
+/// outside the runtime's pool and its accounting.
+fn ensure_pool_owned(blas: &'static RocblasTable, handle: RocblasHandle) -> Result<(), SeamError> {
+    // SAFETY: the handle is live.
+    if unsafe { (blas.is_managing_device_memory)(handle) } {
+        return Err(SeamError::Unavailable {
+            detail: "rocBLAS manages device memory of its own on this handle; the pool \
+                     cannot account for it, so the handle is refused"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Measure what `invoke` needs with rocBLAS's size query, and give the handle a larger
 /// pool buffer when the current one is too small.
 ///
@@ -655,6 +682,7 @@ fn ensure_workspace(
     workspace: &mut Buffer,
     invoke: &dyn Fn() -> i32,
 ) -> Result<usize, SeamError> {
+    ensure_pool_owned(blas, handle)?;
     // SAFETY: the handle is live; while the query is on, rocBLAS and rocSOLVER entries
     // only record their workspace size and launch nothing.
     let status = unsafe { (blas.start_device_memory_size_query)(handle) };
@@ -692,6 +720,7 @@ fn ensure_workspace(
             });
         }
         *workspace = larger;
+        ensure_pool_owned(blas, handle)?;
     }
     Ok(needed)
 }

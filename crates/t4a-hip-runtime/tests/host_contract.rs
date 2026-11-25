@@ -140,6 +140,14 @@ fn a_second_mapped_hip_runtime_is_refused_before_a_stream_is_created() {
     };
     let lib_dir = library.parent().expect("library directory");
     if lib_dir.file_name().and_then(|name| name.to_str()) != Some("lib") {
+        // Review round 4 of #19: this guards the round-1 crash, so on a host that must
+        // run the HIP suite it may not quietly skip.
+        assert!(
+            !matches!(std::env::var("T4A_REQUIRE_HIP").as_deref(), Ok("1")),
+            "T4A_REQUIRE_HIP=1 but {} is not in a `<prefix>/lib` layout, so the \
+             duplicate-runtime guard cannot be exercised here",
+            library.display()
+        );
         eprintln!(
             "skipped: {} is not in a `<prefix>/lib` layout",
             library.display()
