@@ -76,6 +76,37 @@ fn factor(
     (factors, pivots, status)
 }
 
+/// Check `P*A = L*U` for rocSOLVER's packed real factors against `4 n eps |L||U|`.
+///
+/// `P` is rebuilt from the sequential 1-based row interchanges in `pivots`.
+fn assert_lu(matrix: &[Value], n: usize, lu: &[Value], pivots: &[i32]) {
+    let mut permuted: Vec<f64> = matrix.iter().map(|&(re, _)| re).collect();
+    for (row, &pivot) in pivots.iter().enumerate() {
+        let other = usize::try_from(pivot - 1).expect("1-based pivot");
+        assert!(other < n);
+        for col in 0..n {
+            permuted.swap(row + col * n, other + col * n);
+        }
+    }
+    let at = |row: usize, col: usize| lu[row + col * n].0;
+    for col in 0..n {
+        for row in 0..n {
+            let (mut sum, mut magnitude) = (0.0f64, 0.0f64);
+            for inner in 0..=row.min(col) {
+                let l = if inner == row { 1.0 } else { at(row, inner) };
+                let u = at(inner, col);
+                sum += l * u;
+                magnitude += (l * u).abs();
+            }
+            let error = (sum - permuted[row + col * n]).abs();
+            assert!(
+                error <= 4.0 * n as f64 * f64::EPSILON * magnitude.max(f64::MIN_POSITIVE),
+                "P*A != L*U at ({row}, {col}): error {error:e}, scale {magnitude:e}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_zero_pivot_is_reported_through_device_info() {
     within_watchdog("getrf with a device info slot", || {
@@ -110,33 +141,7 @@ fn a_nonsingular_matrix_factors_with_info_zero() {
         let matrix = values(dtype, n * n, 22);
         let (lu, pivots, status) = factor(&mut runtime, &mut blas, dtype, n, &matrix);
         assert_eq!(status, 0);
-        // Rebuild P*A from the sequential 1-based row interchanges, and L*U from the
-        // packed factors, and compare against n * eps * |L||U|.
-        let mut permuted: Vec<f64> = matrix.iter().map(|&(re, _)| re).collect();
-        for (row, &pivot) in pivots.iter().enumerate() {
-            let other = usize::try_from(pivot - 1).expect("1-based pivot");
-            assert!(other < n);
-            for col in 0..n {
-                permuted.swap(row + col * n, other + col * n);
-            }
-        }
-        let at = |row: usize, col: usize| lu[row + col * n].0;
-        for col in 0..n {
-            for row in 0..n {
-                let (mut sum, mut magnitude) = (0.0f64, 0.0f64);
-                for inner in 0..=row.min(col) {
-                    let l = if inner == row { 1.0 } else { at(row, inner) };
-                    let u = at(inner, col);
-                    sum += l * u;
-                    magnitude += (l * u).abs();
-                }
-                let error = (sum - permuted[row + col * n]).abs();
-                assert!(
-                    error <= 4.0 * n as f64 * f64::EPSILON * magnitude.max(f64::MIN_POSITIVE),
-                    "P*A != L*U at ({row}, {col}): error {error:e}, scale {magnitude:e}"
-                );
-            }
-        }
+        assert_lu(&matrix, n, &lu, &pivots);
         // rocSOLVER's workspace, if it needed more than the initial buffer, came from the
         // runtime's pool as well.
         assert!(!blas.manages_own_memory());
@@ -146,6 +151,41 @@ fn a_nonsingular_matrix_factors_with_info_zero() {
             "rocSOLVER getrf n={n}: workspace {} bytes from the pool",
             blas.workspace_bytes()
         );
+    });
+}
+
+#[test]
+fn a_call_that_needs_more_workspace_gets_a_larger_pool_buffer() {
+    // rocSOLVER's getrf queries 0 bytes up to n = 64 and 790,784 bytes at n = 256 on
+    // gfx1151 (rocSOLVER from ROCm 7.2.4), so this call cannot run inside the handle's
+    // initial 4 KiB: in user-owned mode rocSOLVER would report a memory error instead of
+    // allocating. The seam must size the call first and hand over a larger pool buffer.
+    within_watchdog("getrf that outgrows the initial workspace", || {
+        let Some(mut runtime) = runtime() else {
+            return;
+        };
+        let mut blas = Rocblas::new(&mut runtime).expect("handle");
+        assert_eq!(blas.workspace_bytes(), Rocblas::INITIAL_WORKSPACE);
+        let n = 256;
+        let matrix = values(DType::F64, n * n, 24);
+        let (lu, pivots, status) = factor(&mut runtime, &mut blas, DType::F64, n, &matrix);
+        assert_eq!(status, 0);
+        assert_lu(&matrix, n, &lu, &pivots);
+        let workspace = blas.workspace_bytes();
+        assert!(
+            workspace > Rocblas::INITIAL_WORKSPACE,
+            "the workspace must have grown, it is {workspace} bytes"
+        );
+        assert!(
+            !blas.manages_own_memory(),
+            "growing must not hand memory management back to rocBLAS"
+        );
+        let used = runtime.pool_stats().expect("pool").used_bytes;
+        assert!(
+            used >= workspace as u64,
+            "the pool must account for the grown workspace: {used} < {workspace}"
+        );
+        eprintln!("rocSOLVER getrf n={n}: workspace grew to {workspace} bytes from the pool");
     });
 }
 

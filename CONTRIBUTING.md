@@ -17,6 +17,10 @@ This file only records what is specific to `t4a-gpu-backend`:
   host, never in the hosted job; an invoked hardware test on a host without a device fails rather than skipping.
 - **Platforms claimed**: `ubuntu-latest` for the single `host` job (fmt, clippy, tests, rustdoc). No macOS or Windows
   job exists. That job does not run the CUDA device tests: `.github/workflows/ci.yml:27-28` only records that they need a real device and run on a self-hosted GPU host, and no workflow here configures such a runner.
+- **HIP hardware tests** are not behind a feature: `t4a-hip-runtime`'s `rocblas_gemm` and `rocsolver_info` targets
+  report a typed reason and return when no HIP device is usable, so the hosted job runs them as skips. On a ROCm host
+  run them with `T4A_REQUIRE_HIP=1`, which makes a missing device a failure. The evidence so far is from one gfx1151
+  APU (see `docs/design/hip-runtime.md`).
 - **Local gate**: `cargo test --workspace`.
 
 ## Anything here that departs from the shared rules

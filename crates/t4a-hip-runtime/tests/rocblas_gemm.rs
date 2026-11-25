@@ -492,3 +492,18 @@ fn a_foreign_runtime_or_its_buffers_are_refused() {
         Err(SeamError::Runtime(Error::ForeignDomain))
     ));
 }
+
+#[test]
+fn a_nan_result_fails_the_bound_instead_of_vanishing() {
+    // Needs no device: the checker itself. `f64::max` drops a NaN, so a NaN element would
+    // otherwise pass as "no error".
+    let expected = [(1.0, 0.0), (2.0, 0.0)];
+    let magnitude = [1.0, 2.0];
+    for observed in [[(f64::NAN, 0.0), (2.0, 0.0)], [(1.0, 0.0), (f64::NAN, 0.0)]] {
+        let ratio = worst_ratio(DType::F64, &observed, &expected, &magnitude, 4);
+        assert!(
+            ratio > 1.0,
+            "a NaN element must fail the bound, got {ratio}"
+        );
+    }
+}

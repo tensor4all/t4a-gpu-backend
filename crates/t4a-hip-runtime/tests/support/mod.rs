@@ -216,7 +216,13 @@ pub fn worst_ratio(
         .zip(expected)
         .zip(magnitude)
         .map(|((&(or, oi), &(er, ei)), &bound)| {
-            let error = (or - er).abs().max((oi - ei).abs());
+            // Not `f64::max`, which would turn a NaN component into "no error".
+            let (re_error, im_error) = ((or - er).abs(), (oi - ei).abs());
+            let error = if re_error.is_nan() || im_error.is_nan() {
+                f64::INFINITY
+            } else {
+                re_error.max(im_error)
+            };
             if bound == 0.0 {
                 if error == 0.0 {
                     0.0
