@@ -107,8 +107,8 @@ impl Runtime {
     ///
     /// # Errors
     ///
-    /// [`Error::Unavailable`] when HIP is absent, [`Error::MissingSymbol`] for a
-    /// partial install, [`Error::DuplicateRuntime`] when another `libamdhip64` is
+    /// [`Error::Unavailable`] when HIP is absent, [`Error::LibraryUnusable`] or
+    /// [`Error::MissingSymbol`] for a broken or partial install, [`Error::DuplicateRuntime`] when another `libamdhip64` is
     /// already mapped, [`Error::Configuration`] for an empty
     /// `HSA_OVERRIDE_GFX_VERSION`, [`Error::InvalidDevice`] for an unknown ordinal, [`Error::Unsupported`] when the device has no memory pools, and
     /// [`Error::Hip`] for a failing HIP call.
@@ -326,6 +326,8 @@ fn alloc_zeroed(domain: &Arc<Domain>, bytes: usize) -> Result<Buffer> {
 }
 
 fn pointer_class(domain: &Domain, address: *const c_void) -> Result<PointerClass> {
+    // The classification names a device ordinal, so ask on the runtime's device.
+    domain.activate()?;
     let hip = domain.hip();
     let mut attributes = PointerAttributes::zeroed();
     // SAFETY: `attributes` is writable; HIP only inspects `address`, never dereferences

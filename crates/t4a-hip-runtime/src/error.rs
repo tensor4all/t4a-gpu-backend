@@ -29,6 +29,15 @@ pub enum Error {
         /// What is wrong with it and what to do.
         detail: String,
     },
+    /// A library is present but cannot be loaded (not an image, wrong architecture,
+    /// dangling symlink, failing dependency): a broken install, not an absent one.
+    #[error("{library} is present but unusable: {detail}")]
+    LibraryUnusable {
+        /// Library that was requested.
+        library: &'static str,
+        /// Every candidate that was tried, with the loader's message for each.
+        detail: String,
+    },
     /// A library loaded but lacks a symbol this runtime needs: a wrong or partial
     /// install, not an absent one.
     #[error("{library} is missing the required symbol `{symbol}`")]
@@ -98,6 +107,10 @@ impl From<SysError> for Error {
             },
             SysError::LibraryUnavailable { library, detail } => Error::Unavailable {
                 what: library,
+                detail: detail.clone(),
+            },
+            SysError::LibraryUnusable { library, detail } => Error::LibraryUnusable {
+                library,
                 detail: detail.clone(),
             },
             SysError::MissingSymbol { library, symbol } => Error::MissingSymbol { library, symbol },

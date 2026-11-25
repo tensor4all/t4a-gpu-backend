@@ -191,14 +191,16 @@ impl Library {
     ///
     /// # Errors
     ///
-    /// [`Error::LibraryUnavailable`] listing every candidate and why it failed, and
-    /// [`Error::MissingSymbol`] when the opened image lacks `anchor`.
+    /// [`Error::LibraryUnavailable`] when no candidate exists, listing every candidate
+    /// and why it failed; [`Error::LibraryUnusable`] when one exists but cannot be
+    /// loaded; and [`Error::MissingSymbol`] when the opened image lacks `anchor`.
     pub(crate) fn open(
         library: &'static str,
         candidates: &[PathBuf],
         anchor: &'static [u8],
     ) -> Result<Library> {
         let mut failures = Vec::new();
+        let mut present = false;
         for candidate in candidates {
             match imp::open(candidate) {
                 Ok(handle) => {
@@ -213,13 +215,20 @@ impl Library {
                     }
                     return Ok(opened);
                 }
-                Err(detail) => failures.push(format!("{}: {detail}", candidate.display())),
+                Err(detail) => {
+                    present |= candidate_present(candidate, &detail);
+                    failures.push(format!("{}: {detail}", candidate.display()));
+                }
             }
         }
         if failures.is_empty() {
             failures.push("no candidate paths".to_string());
         }
-        Err(Error::unavailable(library, failures.join("; ")))
+        let detail = failures.join("; ");
+        if present {
+            return Err(Error::LibraryUnusable { library, detail });
+        }
+        Err(Error::unavailable(library, detail))
     }
 
     fn raw_symbol(&self, name: &'static [u8]) -> Result<*mut c_void> {
@@ -249,6 +258,23 @@ impl Library {
         // SAFETY: `F` is a function pointer type of pointer size (asserted above) and
         // the caller guarantees it matches the symbol's signature.
         Ok(unsafe { std::mem::transmute_copy::<*mut c_void, F>(&address) })
+    }
+}
+
+/// Whether a candidate that failed to load is nevertheless there.
+///
+/// A path candidate is there when the directory entry exists, a dangling symlink
+/// included. A bare soname is resolved by the dynamic loader, so its own message decides:
+/// anything other than "No such file or directory" means it found a file it could not
+/// load.
+pub(crate) fn candidate_present(candidate: &Path, loader_message: &str) -> bool {
+    let is_path = candidate
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty());
+    if is_path {
+        candidate.symlink_metadata().is_ok()
+    } else {
+        !loader_message.contains("No such file or directory")
     }
 }
 

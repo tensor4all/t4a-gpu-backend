@@ -23,7 +23,7 @@ The seam is test code on purpose. On CUDA the vendor adapter lives in the consum
 moves the ROCm one into `tenferro-gpu/src/rocm/`. Stage 1 proves that the runtime's
 ownership contract carries a vendor library; it does not publish a vendor API.
 
-No ROCm library is linked. `readelf -d` on all three test binaries lists only
+No ROCm library is linked. `readelf -d` on all four test binaries lists only
 `libgcc_s.so.1`, `libc.so.6` and `ld-linux-x86-64.so.2`, and the same binaries run in
 a plain `ubuntu:24.04` container (no ROCm) with every test reporting the typed
 *unavailable* reason and passing; with `T4A_REQUIRE_HIP=1` they fail and name each
@@ -54,6 +54,12 @@ evo2 is the one that runs on a hosted runner.
 ## 3. Loading rules
 
 - Every library is opened with `RTLD_NOW | RTLD_LOCAL` and never closed.
+- **Absent is not broken.** A library is `LibraryUnavailable` only when no candidate
+  exists. A candidate that exists but does not load (not an ELF image, a dangling
+  symlink, a wrong architecture, a failing dependency) is `LibraryUnusable`; a missing
+  symbol is `MissingSymbol`; two runtimes are `DuplicateRuntime`. The hardware tests skip
+  only on the first, so a broken install never reads as "no ROCm on this host"
+  (`a_present_but_broken_hip_image_fails_instead_of_skipping`, which needs no device).
 - HIP candidates are `libamdhip64.so.7` then `.so.6`: `$ROCM_PATH/lib/<soname>` when
   `ROCM_PATH` is set, otherwise the bare soname for the dynamic loader. The unversioned
   `libamdhip64.so` is not a candidate; evo2 also carries a distro

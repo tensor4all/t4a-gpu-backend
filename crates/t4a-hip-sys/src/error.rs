@@ -13,9 +13,19 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// No candidate path for a library could be opened.
+    /// No candidate for a library exists on this host.
     #[error("{library} is unavailable: {detail}")]
     LibraryUnavailable {
+        /// Library that was requested.
+        library: &'static str,
+        /// Every candidate that was tried, with the dynamic loader's message for each.
+        detail: String,
+    },
+    /// A candidate exists but the dynamic loader cannot load it: an image that is not
+    /// ELF, a wrong architecture, a dangling symlink, or a dependency that fails to
+    /// resolve. That is a broken install, never "no ROCm on this host".
+    #[error("{library} is present but unusable: {detail}")]
+    LibraryUnusable {
         /// Library that was requested.
         library: &'static str,
         /// Every candidate that was tried, with the dynamic loader's message for each.

@@ -364,9 +364,13 @@ impl Rocblas {
         // The CUDA seam trusts the caller's buffers here; this one checks that every
         // element the library will touch lies inside its buffer.
         let element = call.dtype.size();
-        fits("a", call.a, element, a_rows, a_cols, lda, batches, stride_a)?;
-        fits("b", call.b, element, b_rows, b_cols, ldb, batches, stride_b)?;
-        fits("c", call.c, element, m, n, ldc, batches, stride_c)?;
+        fits(
+            "gemm", "a", call.a, element, a_rows, a_cols, lda, batches, stride_a,
+        )?;
+        fits(
+            "gemm", "b", call.b, element, b_rows, b_cols, ldb, batches, stride_b,
+        )?;
+        fits("gemm", "c", call.c, element, m, n, ldc, batches, stride_c)?;
         let trans_a = operation(call.trans_a);
         let trans_b = operation(call.trans_b);
         let blas = self.blas;
@@ -473,7 +477,7 @@ impl Rocblas {
             ));
         }
         let element = dtype.size();
-        fits("a", a, element, n, n, lda, 1, 0)?;
+        fits("getrf", "a", a, element, n, n, lda, 1, 0)?;
         if ipiv.len() < n as usize * std::mem::size_of::<i32>() {
             return Err(SeamError::unsupported(
                 "getrf",
@@ -773,6 +777,7 @@ pub fn narrow_i32(op: &'static str, field: &'static str, value: i64) -> Result<i
 /// `batches` times at `stride`, lies inside `buffer`.
 #[allow(clippy::too_many_arguments)]
 fn fits(
+    op: &'static str,
     name: &'static str,
     buffer: &Buffer,
     element: usize,
@@ -797,7 +802,7 @@ fn fits(
     match last {
         Some(bytes) if bytes <= buffer.len() => Ok(()),
         Some(bytes) => Err(SeamError::unsupported(
-            "gemm",
+            op,
             format!(
                 "operand {name} needs {bytes} bytes for its extents, leading dimension \
                  and strides; the buffer holds {}",
@@ -805,7 +810,7 @@ fn fits(
             ),
         )),
         None => Err(SeamError::unsupported(
-            "gemm",
+            op,
             format!("operand {name}'s extent overflows or its batch stride is negative"),
         )),
     }

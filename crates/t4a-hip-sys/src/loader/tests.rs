@@ -98,3 +98,46 @@ fn a_library_that_is_absent_reports_every_candidate() {
         other => panic!("expected a typed unavailable error, got {other:?}"),
     }
 }
+
+#[test]
+fn a_present_but_unloadable_candidate_is_unusable_not_absent() {
+    // Review round 3 of t4a-gpu-backend#19: a broken install must not read as "no ROCm".
+    let dir = std::env::temp_dir().join(format!("t4a-hip-sys-broken-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let not_elf = dir.join("libamdhip64.so.7");
+    std::fs::write(&not_elf, b"not an elf\n").expect("fake image");
+    let dangling = dir.join("libamdhip64.so.6");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.join("missing-target"), &dangling).expect("symlink");
+    let absent = dir.join("libnothing.so.1");
+    let outcome = |candidates: Vec<PathBuf>| Library::open("HIP runtime", &candidates, b"x\0");
+    #[cfg(target_os = "linux")]
+    {
+        assert!(matches!(
+            outcome(vec![not_elf.clone()]),
+            Err(Error::LibraryUnusable { .. })
+        ));
+        assert!(matches!(
+            outcome(vec![absent.clone(), dangling.clone()]),
+            Err(Error::LibraryUnusable { .. })
+        ));
+    }
+    assert!(matches!(
+        outcome(vec![absent.clone()]),
+        Err(Error::LibraryUnavailable { .. })
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_bare_soname_is_absent_only_when_the_loader_found_nothing() {
+    let bare = Path::new("libamdhip64.so.7");
+    assert!(!candidate_present(
+        bare,
+        "libamdhip64.so.7: cannot open shared object file: No such file or directory"
+    ));
+    assert!(candidate_present(
+        bare,
+        "/opt/rocm/lib/libamdhip64.so.7: file too short"
+    ));
+}

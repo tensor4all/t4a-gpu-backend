@@ -179,3 +179,63 @@ fn a_second_mapped_hip_runtime_is_refused_before_a_stream_is_created() {
         "the child must report the duplicate runtime and fail the hardware tests:\n{stdout}"
     );
 }
+
+/// Set in the child process that runs [`child_fails_on_a_broken_hip_image`].
+const BROKEN_MARKER: &str = "T4A_HIP_BROKEN_IMAGE_CHILD";
+
+/// Runs only inside the child process the next test starts with `ROCM_PATH` pointing at
+/// a prefix whose `libamdhip64.so.7` exists but is not a loadable image.
+#[test]
+fn child_fails_on_a_broken_hip_image() {
+    if std::env::var_os(BROKEN_MARKER).is_none() {
+        return;
+    }
+    match Runtime::open(0) {
+        Err(Error::LibraryUnusable { library, detail }) => {
+            println!("runtime refused: {library} is unusable: {detail}");
+        }
+        other => {
+            panic!("a present but unloadable libamdhip64 must not read as absent, got {other:?}")
+        }
+    }
+    let outcome = std::panic::catch_unwind(support::runtime);
+    assert!(
+        outcome.is_err(),
+        "the hardware-test helper must fail on a broken install instead of skipping"
+    );
+    println!("hardware tests fail on it");
+}
+
+#[test]
+fn a_present_but_broken_hip_image_fails_instead_of_skipping() {
+    // Review round 3 of #19: a `ROCM_PATH` whose `libamdhip64.so.7` is not an ELF image
+    // (or a dangling symlink) is a broken install, not a host without ROCm. Needs no
+    // device: the prefix is fake, so this runs on hosted CI too.
+    let prefix = std::env::temp_dir().join(format!("t4a-hip-broken-{}", std::process::id()));
+    std::fs::create_dir_all(prefix.join("lib")).expect("fake prefix");
+    std::fs::write(prefix.join("lib/libamdhip64.so.7"), b"not an elf\n").expect("fake image");
+    let output = Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "child_fails_on_a_broken_hip_image",
+            "--nocapture",
+        ])
+        .env(BROKEN_MARKER, "1")
+        .env("ROCM_PATH", &prefix)
+        .env_remove("T4A_REQUIRE_HIP")
+        .env_remove("LD_PRELOAD")
+        .output()
+        .expect("run the child test");
+    let _ = std::fs::remove_dir_all(&prefix);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "child failed ({:?}):\n{stdout}\n{stderr}",
+        output.status
+    );
+    assert!(
+        stdout.contains("is unusable") && stdout.contains("hardware tests fail on it"),
+        "the child must report the broken image and fail the hardware tests:\n{stdout}"
+    );
+}

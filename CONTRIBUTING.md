@@ -10,8 +10,10 @@ This file only records what is specific to `t4a-gpu-backend`:
 
 ## Local facts
 
-- **MSRV**: `rust-version = "1.75"` in the workspace manifest, inherited by `t4a-cuda-runtime`. CI pins `stable` and
-  has no `msrv` job, so the claim is not checked by CI.
+- **MSRV**: `rust-version = "1.75"` in the workspace manifest, inherited by every crate, `t4a-hip-sys` and
+  `t4a-hip-runtime` included. CI pins `stable` and has no `msrv` job, so the claim is not checked by CI. The HIP crates
+  were checked to build with 1.85 (`cargo +1.85.0 check -p t4a-hip-sys -p t4a-hip-runtime --all-targets`), not with
+  1.75.
 - **Feature combinations CI builds**: `default` (no features) for the tests, and `--all-features` for clippy, which
   compiles the `gpu-tests` targets that need a real CUDA device. The `gpu-tests` suite is executed on a self-hosted GPU
   host, never in the hosted job; an invoked hardware test on a host without a device fails rather than skipping.

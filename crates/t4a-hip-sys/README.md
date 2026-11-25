@@ -5,7 +5,8 @@ Run-time loaded HIP, rocBLAS and rocSOLVER tables for tensor4all: `libamdhip64`,
 
 Nothing is linked at build time, so `readelf -d` on a binary that depends on this crate
 lists no ROCm library, and a host without ROCm gets a typed `LibraryUnavailable` error
-instead of failing to start.
+instead of failing to start. A library that is there but does not load is
+`LibraryUnusable`, so a broken install is never mistaken for an absent one.
 
 Three load-time rules live here because getting them wrong produces misleading failures
 rather than clean errors:
