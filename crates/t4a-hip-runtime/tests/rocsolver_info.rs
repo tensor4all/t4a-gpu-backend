@@ -180,10 +180,25 @@ fn a_call_that_needs_more_workspace_gets_a_larger_pool_buffer() {
             !blas.manages_own_memory(),
             "growing must not hand memory management back to rocBLAS"
         );
-        let used = runtime.pool_stats().expect("pool").used_bytes;
+        assert!(blas.largest_query_bytes() > Rocblas::INITIAL_WORKSPACE);
+        assert_eq!(
+            workspace,
+            blas.largest_query_bytes(),
+            "the workspace grows to what rocSOLVER asked for"
+        );
+        // Two-sided: the pool holds the grown workspace now, and gives it back when the
+        // handle goes.
+        let held = runtime.pool_stats().expect("pool").used_bytes;
         assert!(
-            used >= workspace as u64,
-            "the pool must account for the grown workspace: {used} < {workspace}"
+            held >= workspace as u64,
+            "the pool must account for the grown workspace: {held} < {workspace}"
+        );
+        drop(blas);
+        runtime.synchronize().expect("drain");
+        let released = runtime.pool_stats().expect("pool").used_bytes;
+        assert!(
+            held - released >= workspace as u64,
+            "dropping the handle must return its {workspace}-byte workspace: {held} -> {released}"
         );
         eprintln!("rocSOLVER getrf n={n}: workspace grew to {workspace} bytes from the pool");
     });

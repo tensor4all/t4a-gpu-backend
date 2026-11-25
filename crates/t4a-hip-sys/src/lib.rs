@@ -11,8 +11,9 @@
 //! C types they pass, and three load-time rules:
 //!
 //! - **One prefix.** The math libraries are opened only from the directory the HIP
-//!   runtime came from, and the process is checked for a second `libamdhip64` after
-//!   each one is opened ([`Error::DuplicateRuntime`]).
+//!   runtime came from, and the process is checked for a second `libamdhip64` right
+//!   after the HIP runtime and after each math library is opened
+//!   ([`Error::DuplicateRuntime`]).
 //! - **No empty `HSA_OVERRIDE_GFX_VERSION`.** It is checked before anything is opened
 //!   and refused with [`Error::Configuration`]; see [`GfxOverride`]. The variable is
 //!   never set or changed by this crate.

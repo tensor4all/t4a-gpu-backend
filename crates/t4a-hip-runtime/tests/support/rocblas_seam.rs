@@ -190,6 +190,21 @@ pub struct Rocblas {
     /// Set when the handle's pointer mode could not be proven host; such a handle is
     /// refused rather than allowed to read stack coefficients as device addresses.
     mode_unproven: bool,
+    /// What rocBLAS held of its own when the handle was created, before the seam handed
+    /// it a pool buffer.
+    library_memory_at_creation: LibraryMemory,
+    /// The largest workspace any call through this handle asked for, in bytes.
+    largest_query: usize,
+}
+
+/// Device memory a rocBLAS handle manages itself, as `rocblas_is_managing_device_memory`
+/// and `rocblas_get_device_memory_size` report it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LibraryMemory {
+    /// Whether rocBLAS manages the handle's device memory.
+    pub managed: bool,
+    /// The handle's device-memory size in bytes.
+    pub bytes: usize,
 }
 
 impl Rocblas {
@@ -207,35 +222,58 @@ impl Rocblas {
         // SAFETY: the closure only creates and configures a handle; the workspace it
         // hands over is a pool buffer kept alive by the returned `Rocblas`.
         let created = unsafe {
-            runtime.with_raw(&[], |raw| -> Result<(RocblasHandle, Buffer), SeamError> {
-                let mut handle: RocblasHandle = std::ptr::null_mut();
-                let status = (blas.create_handle)(&mut handle);
-                if status != ROCBLAS_STATUS_SUCCESS {
-                    return Err(SeamError::Unavailable {
-                        detail: format!(
-                            "rocblas_create_handle failed: {} (HSA_OVERRIDE_GFX_VERSION: {:?})",
-                            blas.status_name(status),
-                            GfxOverride::current()
-                        ),
-                    });
-                }
-                match configure(blas, raw, handle) {
-                    Ok(workspace) => Ok((handle, workspace)),
-                    Err(error) => {
-                        (blas.destroy_handle)(handle);
-                        Err(error)
+            runtime.with_raw(
+                &[],
+                |raw| -> Result<(RocblasHandle, Buffer, LibraryMemory), SeamError> {
+                    let mut handle: RocblasHandle = std::ptr::null_mut();
+                    let status = (blas.create_handle)(&mut handle);
+                    if status != ROCBLAS_STATUS_SUCCESS {
+                        return Err(SeamError::Unavailable {
+                            detail: format!(
+                                "rocblas_create_handle failed: {} (HSA_OVERRIDE_GFX_VERSION: {:?})",
+                                blas.status_name(status),
+                                GfxOverride::current()
+                            ),
+                        });
                     }
-                }
-            })?
+                    match configure(blas, raw, handle) {
+                        Ok((workspace, before)) => Ok((handle, workspace, before)),
+                        Err(error) => {
+                            (blas.destroy_handle)(handle);
+                            Err(error)
+                        }
+                    }
+                },
+            )?
         };
-        let (handle, workspace) = created?;
+        let (handle, workspace, library_memory_at_creation) = created?;
         Ok(Rocblas {
             blas,
             handle,
             anchor,
             workspace,
             mode_unproven: false,
+            library_memory_at_creation,
+            largest_query: 0,
         })
+    }
+
+    /// What rocBLAS managed itself when the handle was created, before the seam handed
+    /// over a pool buffer.
+    pub fn library_memory_at_creation(&self) -> LibraryMemory {
+        self.library_memory_at_creation
+    }
+
+    /// The handle's device-memory size as rocBLAS reports it now: the pool buffer's
+    /// size once the seam owns the workspace.
+    pub fn library_memory_now(&self) -> LibraryMemory {
+        library_memory(self.blas, self.handle)
+    }
+
+    /// The largest workspace, in bytes, that rocBLAS's size query reported for any call
+    /// made through this handle.
+    pub fn largest_query_bytes(&self) -> usize {
+        self.largest_query
     }
 
     /// Bytes of the pool buffer the handle currently uses as workspace.
@@ -335,6 +373,7 @@ impl Rocblas {
         let handle = self.handle;
         let dtype = call.dtype;
         let workspace = &mut self.workspace;
+        let largest_query = &mut self.largest_query;
         // SAFETY: the scope registered all three operands, every element the call reads
         // or writes lies inside them (checked above), the workspace is a pool buffer kept
         // alive by `self`, and the call is queued on the runtime's stream.
@@ -397,7 +436,8 @@ impl Rocblas {
                         )
                     }
                 };
-                ensure_workspace(blas, handle, raw, workspace, &invoke)?;
+                let needed = ensure_workspace(blas, handle, raw, workspace, &invoke)?;
+                *largest_query = (*largest_query).max(needed);
                 let status = invoke();
                 if status != ROCBLAS_STATUS_SUCCESS {
                     return Err(SeamError::unsupported(
@@ -502,7 +542,8 @@ impl Rocblas {
         // SAFETY: pointers were classified as device memory above and the caller
         // guarantees their extents.
         let invoke = || unsafe { entry(handle, n32, n32, a, lda32, ipiv, info) };
-        ensure_workspace(self.blas, handle, raw, &mut self.workspace, &invoke)?;
+        let needed = ensure_workspace(self.blas, handle, raw, &mut self.workspace, &invoke)?;
+        self.largest_query = self.largest_query.max(needed);
         let status = invoke();
         if status != ROCBLAS_STATUS_SUCCESS {
             return Err(SeamError::unsupported(
@@ -537,7 +578,7 @@ unsafe fn configure(
     blas: &'static RocblasTable,
     raw: &RawScope<'_>,
     handle: RocblasHandle,
-) -> Result<Buffer, SeamError> {
+) -> Result<(Buffer, LibraryMemory), SeamError> {
     let failed = |what: &str, status| SeamError::Unavailable {
         detail: format!("{what} failed: {}", blas.status_name(status)),
     };
@@ -565,6 +606,7 @@ unsafe fn configure(
             detail: "the handle is not bound to the runtime's stream".to_string(),
         });
     }
+    let before = library_memory(blas, handle);
     let workspace = raw.alloc_zeroed(Rocblas::INITIAL_WORKSPACE)?;
     let pointer = raw.device_ptr(&workspace)?;
     let status = unsafe { (blas.set_workspace)(handle, pointer, workspace.len()) };
@@ -578,21 +620,37 @@ unsafe fn configure(
                 .to_string(),
         });
     }
-    Ok(workspace)
+    Ok((workspace, before))
+}
+
+/// Read a handle's own device-memory state.
+fn library_memory(blas: &'static RocblasTable, handle: RocblasHandle) -> LibraryMemory {
+    let mut bytes = 0usize;
+    // SAFETY: the handle is live and `bytes` is writable.
+    let status = unsafe { (blas.get_device_memory_size)(handle, &mut bytes) };
+    LibraryMemory {
+        // SAFETY: the handle is live.
+        managed: unsafe { (blas.is_managing_device_memory)(handle) },
+        bytes: if status == ROCBLAS_STATUS_SUCCESS {
+            bytes
+        } else {
+            0
+        },
+    }
 }
 
 /// Measure what `invoke` needs with rocBLAS's size query, and give the handle a larger
 /// pool buffer when the current one is too small.
 ///
 /// The replaced buffer is dropped after the handle has switched; its free is queued on
-/// the runtime's stream, after every call that used it.
+/// the runtime's stream, after every call that used it. Returns the queried size.
 fn ensure_workspace(
     blas: &'static RocblasTable,
     handle: RocblasHandle,
     raw: &RawScope<'_>,
     workspace: &mut Buffer,
     invoke: &dyn Fn() -> i32,
-) -> Result<(), SeamError> {
+) -> Result<usize, SeamError> {
     // SAFETY: the handle is live; while the query is on, rocBLAS and rocSOLVER entries
     // only record their workspace size and launch nothing.
     let status = unsafe { (blas.start_device_memory_size_query)(handle) };
@@ -631,7 +689,7 @@ fn ensure_workspace(
         }
         *workspace = larger;
     }
-    Ok(())
+    Ok(needed)
 }
 
 /// Refuse a pointer that HIP does not classify as device memory of the scope's device.

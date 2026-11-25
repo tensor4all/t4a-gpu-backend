@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use crate::error::Result;
-use crate::loader::{hip_candidates, GfxOverride, Library};
+use crate::loader::{ensure_single_hip_runtime, hip_candidates, GfxOverride, Library};
 
 /// `hipError_t`.
 pub type HipError = i32;
@@ -248,8 +248,10 @@ impl HipTable {
     /// # Errors
     ///
     /// [`crate::Error::Configuration`], [`crate::Error::LibraryUnavailable`] listing
-    /// every candidate, or [`crate::Error::MissingSymbol`]. The first outcome is cached
-    /// for the life of the process.
+    /// every candidate, [`crate::Error::MissingSymbol`], or
+    /// [`crate::Error::DuplicateRuntime`] when another `libamdhip64` file is already
+    /// mapped into the process. The first outcome is cached for the life of the
+    /// process.
     pub fn load() -> Result<&'static HipTable> {
         HIP.get_or_init(|| {
             let gfx_override = GfxOverride::current();
@@ -257,6 +259,11 @@ impl HipTable {
             let rocm_path: Option<OsString> = std::env::var_os("ROCM_PATH");
             let candidates = hip_candidates(rocm_path.as_deref());
             let library = Library::open("HIP runtime", &candidates, b"hipGetDeviceCount\0")?;
+            // Another `libamdhip64` may already be in the process (preloaded, or pulled in
+            // by another library under a different soname). Two runtimes have separate
+            // device state, and creating a stream in one of them can crash the process, so
+            // the check runs here, before any table entry can be called.
+            ensure_single_hip_runtime()?;
             // SAFETY: each type below is the C signature of the HIP function named.
             unsafe {
                 Ok(HipTable {

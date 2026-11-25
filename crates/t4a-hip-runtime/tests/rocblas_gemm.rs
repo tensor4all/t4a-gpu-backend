@@ -16,7 +16,7 @@
 
 mod support;
 
-use support::rocblas_seam::{DType, GemmRequest, Rocblas, SeamError};
+use support::rocblas_seam::{DType, GemmRequest, LibraryMemory, Rocblas, SeamError};
 use support::{decode, encode, reference, round, runtime, values, worst_ratio, Operand};
 use t4a_hip_runtime::sys::{mapped_hip_runtimes, RocblasTable, RocsolverTable};
 use t4a_hip_runtime::{Error, Runtime};
@@ -140,7 +140,16 @@ fn run(runtime: &mut Runtime, blas: &mut Rocblas, dtype: DType, case: Case) -> f
 fn check(runtime: &mut Runtime, blas: &mut Rocblas, case: Case) {
     for dtype in DType::ALL {
         let ratio = run(runtime, blas, dtype, case);
-        eprintln!("{dtype:?} {case:?}: worst |c - c_ref| / bound = {ratio:.3e}");
+        eprintln!(
+            "{dtype:?} {case:?}: worst |c - c_ref| / bound = {ratio:.3e}; \
+             largest workspace query so far {} bytes, pool workspace {} bytes",
+            blas.largest_query_bytes(),
+            blas.workspace_bytes()
+        );
+        // Every call ran inside a pool buffer at least as large as rocBLAS asked for,
+        // and rocBLAS kept no memory of its own.
+        assert!(blas.workspace_bytes() >= blas.largest_query_bytes());
+        assert!(!blas.manages_own_memory());
         assert!(
             ratio <= 1.0,
             "{dtype:?} {case:?}: error exceeds f*k*eps*|a||b| by {ratio:.3e}x"
@@ -208,21 +217,42 @@ fn the_handle_runs_on_the_runtime_stream_with_a_pool_owned_workspace() {
     let Some(mut runtime) = runtime() else {
         return;
     };
+    runtime.synchronize().expect("drain");
     let before = runtime.pool_stats().expect("pool stats").used_bytes;
     let blas = Rocblas::new(&mut runtime).expect("handle");
     runtime.synchronize().expect("drain");
-    let after = runtime.pool_stats().expect("pool stats").used_bytes;
+    let held = runtime.pool_stats().expect("pool stats").used_bytes;
     assert_eq!(blas.bound_stream() as usize as u64, runtime.stream_id());
-    assert!(
-        !blas.manages_own_memory(),
-        "rocBLAS must not keep device memory outside the runtime's pool"
+    // A fresh handle manages device memory of its own; that is what the seam replaces.
+    let created = blas.library_memory_at_creation();
+    eprintln!(
+        "rocBLAS at handle creation: {created:?}; after the seam: {:?}",
+        blas.library_memory_now()
     );
-    assert!(blas.workspace_bytes() >= Rocblas::INITIAL_WORKSPACE);
     assert!(
-        after >= before + blas.workspace_bytes() as u64,
-        "the pool must account for the workspace: {before} -> {after} bytes, workspace {}",
+        created.managed,
+        "a fresh rocBLAS handle manages its own memory, so handing it a pool buffer matters"
+    );
+    assert_eq!(
+        blas.library_memory_now(),
+        LibraryMemory {
+            managed: false,
+            bytes: blas.workspace_bytes()
+        },
+        "after the seam, rocBLAS's device memory is exactly the pool buffer"
+    );
+    assert_eq!(blas.workspace_bytes(), Rocblas::INITIAL_WORKSPACE);
+    let grown = held - before;
+    assert!(
+        grown >= blas.workspace_bytes() as u64
+            && grown <= blas.workspace_bytes() as u64 + (2 << 20),
+        "the pool must hold the workspace: used {before} -> {held} bytes, workspace {}",
         blas.workspace_bytes()
     );
+    // Dropping the seam returns the workspace to the pool.
+    drop(blas);
+    runtime.synchronize().expect("drain");
+    assert_eq!(runtime.pool_stats().expect("pool stats").used_bytes, before);
 }
 
 #[test]

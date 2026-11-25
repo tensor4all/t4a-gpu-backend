@@ -88,3 +88,79 @@ fn an_empty_gfx_override_is_refused_by_name_before_hip_loads() {
         "the child must name the variable:\n{stdout}"
     );
 }
+
+/// Set in the child process that runs [`child_refuses_a_second_mapped_hip_runtime`].
+const DUPLICATE_MARKER: &str = "T4A_HIP_DUPLICATE_RUNTIME_CHILD";
+
+/// Runs only inside the child process the next test starts with a second copy of
+/// `libamdhip64` preloaded.
+#[test]
+fn child_refuses_a_second_mapped_hip_runtime() {
+    if std::env::var_os(DUPLICATE_MARKER).is_none() {
+        return;
+    }
+    match Runtime::open(0) {
+        Err(Error::Unavailable { detail, .. }) if detail.contains("more than one HIP runtime") => {
+            println!("runtime refused: {detail}");
+        }
+        other => panic!(
+            "a second mapped HIP runtime must be refused before any stream exists, got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn a_second_mapped_hip_runtime_is_refused_before_a_stream_is_created() {
+    // Review of t4a-gpu-backend#19: with another `libamdhip64` already in the process (the
+    // reviewer preloaded the distro's `libamdhip64.so.5` on evo2), `Runtime::open` went on
+    // to create a stream in one of two runtimes and the process died. The portable way to
+    // get two runtimes is to preload a copy of the real library under another path and
+    // pin `ROCM_PATH` to the real prefix, so the loader maps both files.
+    let library = match t4a_hip_runtime::sys::HipTable::load() {
+        Ok(hip) => std::fs::canonicalize(hip.library_path()).expect("canonical HIP path"),
+        Err(error) => {
+            assert!(
+                !matches!(std::env::var("T4A_REQUIRE_HIP").as_deref(), Ok("1")),
+                "T4A_REQUIRE_HIP=1 but HIP is unavailable: {error}"
+            );
+            eprintln!("skipped: {error}");
+            return;
+        }
+    };
+    let lib_dir = library.parent().expect("library directory");
+    if lib_dir.file_name().and_then(|name| name.to_str()) != Some("lib") {
+        eprintln!(
+            "skipped: {} is not in a `<prefix>/lib` layout",
+            library.display()
+        );
+        return;
+    }
+    let prefix = lib_dir.parent().expect("ROCm prefix");
+    let copy_dir = std::env::temp_dir().join(format!("t4a-hip-duplicate-{}", std::process::id()));
+    std::fs::create_dir_all(&copy_dir).expect("copy directory");
+    let copy = copy_dir.join("libamdhip64.so.7");
+    std::fs::copy(&library, &copy).expect("copy libamdhip64");
+    let output = Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "child_refuses_a_second_mapped_hip_runtime",
+            "--nocapture",
+        ])
+        .env(DUPLICATE_MARKER, "1")
+        .env("LD_PRELOAD", &copy)
+        .env("ROCM_PATH", prefix)
+        .output()
+        .expect("run the child test");
+    let _ = std::fs::remove_dir_all(&copy_dir);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "child failed ({:?}):\n{stdout}\n{stderr}",
+        output.status
+    );
+    assert!(
+        stdout.contains("runtime refused: more than one HIP runtime is mapped"),
+        "the child must report the duplicate runtime:\n{stdout}"
+    );
+}

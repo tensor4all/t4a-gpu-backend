@@ -119,6 +119,7 @@ impl Domain {
     }
 
     pub(crate) fn pool_attribute(&self, attribute: i32) -> Result<u64> {
+        self.activate()?;
         let mut value = 0u64;
         // SAFETY: both attributes this crate reads are `uint64_t`.
         check(self.hip, "hipMemPoolGetAttribute", unsafe {

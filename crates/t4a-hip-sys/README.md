@@ -12,7 +12,8 @@ rather than clean errors:
 
 - **One prefix, one HIP runtime.** rocBLAS and rocSOLVER are opened only from the
   directory the HIP runtime was mapped from, and the process is checked for a second
-  `libamdhip64` after each one (`DuplicateRuntime`).
+  `libamdhip64` right after the HIP runtime and after each math library is opened
+  (`DuplicateRuntime`), before any stream can be created in the wrong one.
 - **No empty `HSA_OVERRIDE_GFX_VERSION`.** Exported but empty, it makes
   `rocblas_create_handle` fail with `rocblas_status_invalid_handle`, which reads like a
   missing dtype. It is refused by name before anything is opened, and never modified.

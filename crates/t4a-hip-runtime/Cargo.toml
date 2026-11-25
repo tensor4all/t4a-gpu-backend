@@ -30,6 +30,10 @@ path = "tests/rocblas_gemm.rs"
 name = "rocsolver_info"
 path = "tests/rocsolver_info.rs"
 
+[[test]]
+name = "runtime_pool"
+path = "tests/runtime_pool.rs"
+
 [[example]]
 name = "rocblas_gflops"
 path = "examples/rocblas_gflops.rs"

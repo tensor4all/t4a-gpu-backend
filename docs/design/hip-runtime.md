@@ -59,10 +59,15 @@ evo2 is the one that runs on a hosted runner.
   `libamdhip64.so` is not a candidate; evo2 also carries a distro
   `/lib/x86_64-linux-gnu/libamdhip64.so.5`.
 - rocBLAS and rocSOLVER are opened **only** from the directory of the `libamdhip64` that
-  was mapped (found with `dladdr`). Both name `libamdhip64.so.7` as `NEEDED`; after each
-  is opened, `/proc/self/maps` is scanned and a second distinct `libamdhip64` file is
-  refused (`DuplicateRuntime`). On evo2 exactly one is mapped
-  (`the_device_and_libraries_are_recorded`).
+  was mapped (found with `dladdr`). Both name `libamdhip64.so.7` as `NEEDED`.
+- **One HIP runtime per process.** Right after the HIP runtime is opened, and again after
+  each math library, `/proc/self/maps` is scanned and a second distinct `libamdhip64` file
+  is refused (`DuplicateRuntime`) before any stream exists. Two runtimes have separate
+  device state: with the distro `libamdhip64.so.5` preloaded, opening a runtime used to
+  dump core, and now fails with an error naming both files. The regression test preloads
+  a copy of the real library in a child process
+  (`a_second_mapped_hip_runtime_is_refused_before_a_stream_is_created`). On evo2, without
+  a preload, exactly one is mapped (`the_device_and_libraries_are_recorded`).
 - `HSA_OVERRIDE_GFX_VERSION` is read before anything is opened. Set but empty, it is
   refused with a configuration error that names it; with rocBLAS 5.2.0 that state makes
   `rocblas_create_handle` return `rocblas_status_invalid_handle`, which reads like a
@@ -88,13 +93,19 @@ evo2 is the one that runs on a hosted runner.
     reported as `hipMemoryTypeUnregistered`, and a pool address (also an interior one)
     as `hipMemoryTypeDevice`.
 - **Workspace is pool-owned.** A fresh handle reports
-  `rocblas_is_managing_device_memory = true` and a 32 MiB device-memory size of its own.
+  `rocblas_is_managing_device_memory = true` and a device-memory size of its own
+  (33,554,432 bytes, recorded by the seam before it hands over the pool buffer and
+  asserted `managed` in `the_handle_runs_on_the_runtime_stream_with_a_pool_owned_workspace`).
   The seam hands it a 4 KiB pool buffer with `rocblas_set_workspace`, after which rocBLAS
-  frees its own memory and reports `false`. Before every call the seam runs rocBLAS's
+  frees its own memory and reports `false` with exactly the pool buffer's size. The pool
+  accounting is checked two-sided: `used` grows by the allocation and returns to its
+  starting value after the free (`tests/runtime_pool.rs`), so a high-water mark would
+  fail. Before every call the seam runs rocBLAS's
   size query (`rocblas_{start,stop}_device_memory_size_query`) on the same arguments and
   hands over a larger pool buffer if needed. The replaced buffer's free is ordered
-  after the calls that used it. On gfx1151 every GEMM in the tests and benchmark queried
-  0 bytes. rocSOLVER's `dgetrf` queries 0 bytes up to n = 64 and 790,784 bytes at
+  after the calls that used it. On gfx1151 every GEMM in the test suite queried 0 bytes
+  (each case logs `largest workspace query so far`, and asserts the pool buffer covers
+  it). rocSOLVER's `dgetrf` queries 0 bytes up to n = 64 and 790,784 bytes at
   n = 256, and at n = 256 the seam grows the pool buffer to exactly that
   (`a_call_that_needs_more_workspace_gets_a_larger_pool_buffer`). With the growth step
   removed, the same call fails with `rocblas_status_memory_error`: in user-owned mode
