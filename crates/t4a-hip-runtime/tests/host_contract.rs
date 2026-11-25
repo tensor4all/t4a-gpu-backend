@@ -3,6 +3,8 @@
 //! On a host with ROCm these paths reach real HIP; on a host without it they observe the
 //! typed absent error. Neither case may panic or fail to start.
 
+mod support;
+
 use std::process::Command;
 
 use t4a_hip_runtime::sys::{GfxOverride, RocblasTable};
@@ -100,13 +102,22 @@ fn child_refuses_a_second_mapped_hip_runtime() {
         return;
     }
     match Runtime::open(0) {
-        Err(Error::Unavailable { detail, .. }) if detail.contains("more than one HIP runtime") => {
-            println!("runtime refused: {detail}");
+        Err(Error::DuplicateRuntime { paths }) => {
+            assert_eq!(paths.len(), 2, "both files are named: {paths:?}");
+            println!("runtime refused: more than one HIP runtime is mapped: {paths:?}");
         }
         other => panic!(
             "a second mapped HIP runtime must be refused before any stream exists, got {other:?}"
         ),
-    }
+    } // Review round 2 of #19: this is an environment problem, so the hardware tests must
+      // fail on it, not report a skip (`support::runtime` skips only an absent library or
+      // device).
+    let outcome = std::panic::catch_unwind(support::runtime);
+    assert!(
+        outcome.is_err(),
+        "the hardware-test helper must fail on a duplicate runtime instead of skipping"
+    );
+    println!("hardware tests fail on it");
 }
 
 #[test]
@@ -147,6 +158,9 @@ fn a_second_mapped_hip_runtime_is_refused_before_a_stream_is_created() {
             "--nocapture",
         ])
         .env(DUPLICATE_MARKER, "1")
+        // Without `T4A_REQUIRE_HIP` the helper decides between skip and failure on the
+        // error alone, which is what the child checks.
+        .env_remove("T4A_REQUIRE_HIP")
         .env("LD_PRELOAD", &copy)
         .env("ROCM_PATH", prefix)
         .output()
@@ -160,7 +174,8 @@ fn a_second_mapped_hip_runtime_is_refused_before_a_stream_is_created() {
         output.status
     );
     assert!(
-        stdout.contains("runtime refused: more than one HIP runtime is mapped"),
-        "the child must report the duplicate runtime:\n{stdout}"
+        stdout.contains("runtime refused: more than one HIP runtime is mapped")
+            && stdout.contains("hardware tests fail on it"),
+        "the child must report the duplicate runtime and fail the hardware tests:\n{stdout}"
     );
 }

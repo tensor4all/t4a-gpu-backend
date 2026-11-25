@@ -9,7 +9,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// A library this runtime needs cannot be loaded, or the host has no device.
+    /// A library this runtime needs is absent from the host.
+    ///
+    /// This is the only "not here" outcome: a library that loads but is unusable, or an
+    /// environment that breaks it, has its own variant, so a caller (or a test) that
+    /// treats absence as a skip never skips a broken setup.
     #[error("{what} is unavailable: {detail}")]
     Unavailable {
         /// What is missing.
@@ -24,6 +28,23 @@ pub enum Error {
         variable: &'static str,
         /// What is wrong with it and what to do.
         detail: String,
+    },
+    /// A library loaded but lacks a symbol this runtime needs: a wrong or partial
+    /// install, not an absent one.
+    #[error("{library} is missing the required symbol `{symbol}`")]
+    MissingSymbol {
+        /// Library the symbol was looked up in.
+        library: &'static str,
+        /// Symbol name.
+        symbol: &'static str,
+    },
+    /// More than one HIP runtime file is mapped into this process (for example a
+    /// preloaded distro `libamdhip64.so.5` next to the ROCm one). Two runtimes have
+    /// separate device state, so nothing is created in either.
+    #[error("more than one HIP runtime is mapped into this process: {paths:?}")]
+    DuplicateRuntime {
+        /// Every distinct `libamdhip64` file found in the process's mappings.
+        paths: Vec<std::path::PathBuf>,
     },
     /// The ordinal does not name a visible device.
     #[error("HIP device {ordinal} does not exist ({count} visible)")]
@@ -79,9 +100,9 @@ impl From<SysError> for Error {
                 what: library,
                 detail: detail.clone(),
             },
-            SysError::MissingSymbol { library, .. } => Error::Unavailable {
-                what: library,
-                detail: error.to_string(),
+            SysError::MissingSymbol { library, symbol } => Error::MissingSymbol { library, symbol },
+            SysError::DuplicateRuntime { paths } => Error::DuplicateRuntime {
+                paths: paths.clone(),
             },
             _ => Error::Unavailable {
                 what: "HIP runtime",

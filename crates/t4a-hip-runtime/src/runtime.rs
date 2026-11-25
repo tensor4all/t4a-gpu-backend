@@ -107,9 +107,10 @@ impl Runtime {
     ///
     /// # Errors
     ///
-    /// [`Error::Unavailable`] when HIP cannot be loaded, [`Error::Configuration`] for an
-    /// empty `HSA_OVERRIDE_GFX_VERSION`, [`Error::InvalidDevice`] for an unknown
-    /// ordinal, [`Error::Unsupported`] when the device has no memory pools, and
+    /// [`Error::Unavailable`] when HIP is absent, [`Error::MissingSymbol`] for a
+    /// partial install, [`Error::DuplicateRuntime`] when another `libamdhip64` is
+    /// already mapped, [`Error::Configuration`] for an empty
+    /// `HSA_OVERRIDE_GFX_VERSION`, [`Error::InvalidDevice`] for an unknown ordinal, [`Error::Unsupported`] when the device has no memory pools, and
     /// [`Error::Hip`] for a failing HIP call.
     pub fn open(ordinal: usize) -> Result<Runtime> {
         let hip = HipTable::load()?;
