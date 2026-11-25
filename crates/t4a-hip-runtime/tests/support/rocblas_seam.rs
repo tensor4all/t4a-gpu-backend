@@ -490,7 +490,10 @@ impl Rocblas {
         }
         let element = dtype.size();
         fits("getrf", "a", a, element, n, n, lda, 1, 0)?;
-        if ipiv.len() < n as usize * std::mem::size_of::<i32>() {
+        let ipiv_bytes = usize::try_from(n)
+            .ok()
+            .and_then(|n| n.checked_mul(std::mem::size_of::<i32>()));
+        if ipiv_bytes.map_or(true, |bytes| ipiv.len() < bytes) {
             return Err(SeamError::unsupported(
                 "getrf",
                 "ipiv holds fewer than n entries",

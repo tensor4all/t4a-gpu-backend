@@ -265,17 +265,23 @@ impl Library {
 ///
 /// A path candidate is there when the directory entry exists, a dangling symlink
 /// included. A bare soname is resolved by the dynamic loader, so its own message decides:
-/// anything other than "No such file or directory" means it found a file it could not
-/// load.
+/// the candidate is absent only when the message is "not found" *for the candidate
+/// itself* (`<soname>: cannot open shared object file: No such file or directory`). glibc
+/// words a missing dependency the same way but names the dependency, and that means the
+/// candidate was found and is broken.
 pub(crate) fn candidate_present(candidate: &Path, loader_message: &str) -> bool {
     let is_path = candidate
         .parent()
         .is_some_and(|parent| !parent.as_os_str().is_empty());
     if is_path {
-        candidate.symlink_metadata().is_ok()
-    } else {
-        !loader_message.contains("No such file or directory")
+        return candidate.symlink_metadata().is_ok();
     }
+    let name = candidate.to_string_lossy();
+    let not_found_itself = loader_message
+        .strip_prefix(name.as_ref())
+        .and_then(|rest| rest.strip_prefix(": "))
+        .is_some_and(|rest| rest.contains("No such file or directory"));
+    !not_found_itself
 }
 
 fn symbol_name(name: &'static [u8]) -> &'static str {

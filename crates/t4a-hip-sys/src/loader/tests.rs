@@ -141,3 +141,19 @@ fn a_bare_soname_is_absent_only_when_the_loader_found_nothing() {
         "/opt/rocm/lib/libamdhip64.so.7: file too short"
     ));
 }
+
+#[test]
+fn a_bare_soname_with_a_missing_dependency_is_present() {
+    // Review round 5 of t4a-gpu-backend#19: glibc reports a missing *dependency* with the
+    // same "No such file or directory" phrase, but naming the dependency. The candidate
+    // was found, so this is a broken install, not an absent one.
+    let bare = Path::new("libamdhip64.so.7");
+    assert!(candidate_present(
+        bare,
+        "libstub.so: cannot open shared object file: No such file or directory"
+    ));
+    assert!(candidate_present(
+        bare,
+        "libamdhip64.so.7.2: cannot open shared object file: No such file or directory"
+    ));
+}
