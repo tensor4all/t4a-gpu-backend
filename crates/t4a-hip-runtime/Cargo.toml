@@ -1,0 +1,39 @@
+[package]
+name = "t4a-hip-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Standalone HIP execution runtime (one stream, one explicit memory pool, ordered copies and a raw vendor seam) for tensor4all"
+readme = "README.md"
+keywords = ["hip", "rocm", "amd", "gpu", "tensor4all"]
+categories = ["hardware-support", "science"]
+
+[dependencies]
+t4a-hip-sys = { path = "../t4a-hip-sys", version = "=0.1.0" }
+thiserror = "2"
+
+# The hardware tests select themselves at run time: without a HIP device they report
+# the typed unavailable error and return, unless `T4A_REQUIRE_HIP=1` makes a missing
+# device a failure. That keeps one test binary runnable on hosts with and without ROCm.
+[[test]]
+name = "host_contract"
+path = "tests/host_contract.rs"
+
+[[test]]
+name = "rocblas_gemm"
+path = "tests/rocblas_gemm.rs"
+
+[[test]]
+name = "rocsolver_info"
+path = "tests/rocsolver_info.rs"
+
+[[test]]
+name = "runtime_pool"
+path = "tests/runtime_pool.rs"
+
+[[example]]
+name = "rocblas_gflops"
+path = "examples/rocblas_gflops.rs"

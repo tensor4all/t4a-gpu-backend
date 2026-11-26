@@ -130,6 +130,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "t4a-hip-runtime"
+version = "0.1.0"
+dependencies = [
+ "t4a-hip-sys",
+ "thiserror",
+]
+
+[[package]]
+name = "t4a-hip-sys"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror",
+]
+
+[[package]]
 name = "t4a-metal-runtime"
 version = "0.1.2"
 dependencies = [

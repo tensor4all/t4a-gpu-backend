@@ -58,13 +58,18 @@ The Apple GPU runtime lives here too: [`crates/t4a-metal-sys`](crates/t4a-metal-
 [tenferro-rs#2402](https://github.com/tensor4all/tenferro-rs/issues/2402), with the mechanisms and the measured
 capability dump in the [detailed design](docs/design/metal-runtime.md).
 
-HIP/ROCm and Intel GPU implementations are future directions. Each runtime can use its native execution model.
+The AMD GPU runtime has started: [`crates/t4a-hip-sys`](crates/t4a-hip-sys/README.md) and
+[`crates/t4a-hip-runtime`](crates/t4a-hip-runtime/README.md) are stage 1 of
+[tenferro-rs#2489](https://github.com/tensor4all/tenferro-rs/issues/2489): one stream and one explicit memory pool per
+runtime, run-time loaded HIP/rocBLAS/rocSOLVER, and a rocBLAS GEMM seam validated on gfx1151, with the record in
+[`docs/design/hip-runtime.md`](docs/design/hip-runtime.md). Kernel compilation (hiprtc) and the tenferro engine are
+later stages. Intel GPU implementations are a future direction. Each runtime can use its native execution model.
 Shared numerical specifications and tests should grow from concrete implementations; a universal runtime
 abstraction or kernel language is not a prerequisite.
 
 ## Layout and releases
 
-The workspace members are `crates/t4a-cuda-runtime/` (published on crates.io as [`t4a-cuda-runtime`](https://crates.io/crates/t4a-cuda-runtime)) and, for the Apple GPU runtime, [crates/t4a-metal-sys](crates/t4a-metal-sys/README.md) and [crates/t4a-metal-runtime](crates/t4a-metal-runtime/README.md), neither of which is published. Placeholder crates for future platforms are unnecessary.
+The workspace members are `crates/t4a-cuda-runtime/` (published on crates.io as [`t4a-cuda-runtime`](https://crates.io/crates/t4a-cuda-runtime)) and, for the Apple GPU runtime, [crates/t4a-metal-sys](crates/t4a-metal-sys/README.md) and [crates/t4a-metal-runtime](crates/t4a-metal-runtime/README.md), and, for the AMD GPU runtime, [crates/t4a-hip-sys](crates/t4a-hip-sys/README.md) and [crates/t4a-hip-runtime](crates/t4a-hip-runtime/README.md); none of these four is published. Placeholder crates for future platforms are unnecessary.
 
 ## Validation and adoption
 

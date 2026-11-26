@@ -10,13 +10,19 @@ This file only records what is specific to `t4a-gpu-backend`:
 
 ## Local facts
 
-- **MSRV**: `rust-version = "1.75"` in the workspace manifest, inherited by `t4a-cuda-runtime`. CI pins `stable` and
-  has no `msrv` job, so the claim is not checked by CI.
+- **MSRV**: `rust-version = "1.75"` in the workspace manifest, inherited by every crate, `t4a-hip-sys` and
+  `t4a-hip-runtime` included. CI pins `stable` and has no `msrv` job, so the claim is not checked by CI. The HIP crates
+  were checked to build with 1.85 (`cargo +1.85.0 check -p t4a-hip-sys -p t4a-hip-runtime --all-targets`), not with
+  1.75.
 - **Feature combinations CI builds**: `default` (no features) for the tests, and `--all-features` for clippy, which
   compiles the `gpu-tests` targets that need a real CUDA device. The `gpu-tests` suite is executed on a self-hosted GPU
   host, never in the hosted job; an invoked hardware test on a host without a device fails rather than skipping.
 - **Platforms claimed**: `ubuntu-latest` for the single `host` job (fmt, clippy, tests, rustdoc). No macOS or Windows
   job exists. That job does not run the CUDA device tests: `.github/workflows/ci.yml:27-28` only records that they need a real device and run on a self-hosted GPU host, and no workflow here configures such a runner.
+- **HIP hardware tests** are not behind a feature: `t4a-hip-runtime`'s `rocblas_gemm`, `rocsolver_info` and `runtime_pool` targets
+  report a typed reason and return when no HIP device is usable, so the hosted job runs them as skips. On a ROCm host
+  run them with `T4A_REQUIRE_HIP=1`, which makes a missing device a failure. The evidence so far is from one gfx1151
+  APU (see `docs/design/hip-runtime.md`).
 - **Local gate**: `cargo test --workspace`.
 
 ## Anything here that departs from the shared rules
