@@ -203,3 +203,47 @@ rocFFT, the tenferro `RocmEngine` and `rocm` feature (stage 2), and anything wav
   refuses the pointer); the trap itself was not deliberately triggered on this shared
   host, because doing so page-faults the GPU. The guard's mutation was checked with the
   classification-only test instead.
+
+## 10. Standalone validation binary (M1 acceptance)
+
+```sh
+cargo run --release -p t4a-hip-runtime --example validate            # HIP, then CUDA
+cargo run --release -p t4a-hip-runtime --example validate -- --cuda-first
+```
+
+It prints the enumeration (§1), checks rocBLAS `f32` and `f64` GEMM against the
+compensated CPU reference (n = 192), times both at n = 2048 and prints the
+`f64`/`f32` ratio next to the issue's ~1/7, then runs the dual-vendor symbol test.
+Throughput is recorded, never gated; a ratio outside 0.08..0.25 is printed as a
+disagreement. Steps that cannot run print `NOT RUN` with the reason and are counted in the
+final line, never reported as passes.
+
+**Dual-vendor symbol test.** After `libamdhip64` and rocBLAS (`RTLD_LOCAL`, §3) it opens
+`libhiprtc` the same way (its `libamd_comgr` carries LLVM), loads NVRTC through cudarc's
+run-time loader (`libloading`, also `RTLD_LOCAL`; it bundles its own LLVM), and then asks
+both to work: hiprtc compiles a kernel for the device, NVRTC compiles one to PTX, and a
+rocBLAS GEMM is re-checked afterwards, in both load orders. It finally asserts that
+`dlsym(RTLD_DEFAULT, …)` finds none of the HIP, hiprtc, rocBLAS, comgr, LLVM
+(`LLVMInitializeAMDGPUTarget`), NVRTC or driver symbols. cudarc is a dev-dependency of
+the example only.
+
+**What ran where (2026-11-27, evo, `gfx1150`, ROCm 7.2.1 packages).** HIP, rocBLAS, hiprtc
+and NVRTC 13.0 (from a pip `nvidia-cuda-nvrtc` wheel, exposed to cudarc through a
+`libnvrtc.so` symlink and `LD_LIBRARY_PATH`, because cudarc's `cuda-12080` build does not
+probe `.so.13`) ran in one process, in both orders: the LLVM-vs-LLVM load and use was
+exercised. **Not run:** the CUDA driver library and any CUDA device work, because this host
+has no NVIDIA GPU and no `libcuda`. So the claim "HIP and CUDA execute side by side" is
+not established by this record, only "the compilers and libraries coexist".
+
+**What the M6 CI lane must do instead.** Run this binary on a host with both an AMD and an
+NVIDIA device (self-hosted, like the `gpu-tests` lane), with `libcuda` present, and extend
+step 3 with a CUDA context, a small launch and a `t4a-cuda-runtime` round trip between the
+two HIP assertions. A hosted runner with neither device can only repeat the
+`NOT RUN`-tolerant form and the build-time check (`readelf -d` lists no ROCm or CUDA
+library).
+
+**Naming.** The device handle in this repository is the per-vendor `ordinal` that
+`t4a-cuda-runtime` also uses (`Error::InvalidDevice { ordinal, .. }`); pairing it with a
+kind (`DeviceId { kind: Gpu(Rocm), ordinal }`) is tenferro-gpu's job in stage 2, so no
+second `DeviceId` type is introduced here. As §1 records, there is no `rocm` Cargo feature:
+the hardware paths select themselves at run time.

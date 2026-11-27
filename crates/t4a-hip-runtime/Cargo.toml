@@ -37,3 +37,21 @@ path = "tests/runtime_pool.rs"
 [[example]]
 name = "rocblas_gflops"
 path = "examples/rocblas_gflops.rs"
+
+# The standalone validation binary (`cargo run --release -p t4a-hip-runtime --example
+# validate`). Its dual-vendor step loads NVRTC the way `t4a-cuda-runtime` does (cudarc,
+# run-time loaded), so cudarc is a dev-dependency only: nothing a consumer of this crate
+# builds or loads changes.
+[dev-dependencies]
+cudarc = { version = "=0.19.10", default-features = false, features = [
+    "std",
+    "driver",
+    "nvrtc",
+    "dynamic-loading",
+    "cuda-12080",
+] }
+libc = "0.2"
+
+[[example]]
+name = "validate"
+path = "examples/validate.rs"
