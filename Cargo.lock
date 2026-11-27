@@ -133,6 +133,8 @@ dependencies = [
 name = "t4a-hip-runtime"
 version = "0.1.0"
 dependencies = [
+ "cudarc",
+ "libc",
  "t4a-hip-sys",
  "thiserror",
 ]
