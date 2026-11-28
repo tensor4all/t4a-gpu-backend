@@ -5,6 +5,7 @@ members = [
     "crates/t4a-metal-runtime",
     "crates/t4a-hip-sys",
     "crates/t4a-hip-runtime",
+    "crates/t4a-hip-kernels",
 ]
 resolver = "2"
 

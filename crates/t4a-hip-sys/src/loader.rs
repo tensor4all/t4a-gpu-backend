@@ -21,6 +21,9 @@ pub const HIP_SONAMES: &[&str] = &["libamdhip64.so.7", "libamdhip64.so.6"];
 /// rocBLAS sonames, newest first. They are only looked up next to the HIP runtime.
 pub const ROCBLAS_SONAMES: &[&str] = &["librocblas.so.5", "librocblas.so.4"];
 
+/// hiprtc sonames, newest first. They are only looked up next to the HIP runtime.
+pub const HIPRTC_SONAMES: &[&str] = &["libhiprtc.so.7", "libhiprtc.so.6"];
+
 /// rocSOLVER sonames. They are only looked up next to the HIP runtime.
 pub const ROCSOLVER_SONAMES: &[&str] = &["librocsolver.so.0"];
 
