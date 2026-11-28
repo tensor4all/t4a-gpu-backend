@@ -1,0 +1,28 @@
+[package]
+name = "t4a-hip-kernels"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version = "1.82" # t4a-cuda-kernels 0.4.0 declares 1.82
+repository.workspace = true
+authors.workspace = true
+description = "HIP kernel catalogue compiled at run time with hiprtc, reusing the t4a-cuda-kernels C ABI, for tensor4all"
+readme = "README.md"
+keywords = ["hip", "rocm", "hiprtc", "kernels", "tensor4all"]
+categories = ["hardware-support", "science"]
+
+[dependencies]
+t4a-hip-sys = { path = "../t4a-hip-sys", version = "=0.1.0" }
+t4a-hip-runtime = { path = "../t4a-hip-runtime", version = "=0.1.0" }
+# The CUDA crate is the single source of truth for the kernel text, the ABI header and
+# the launch planning. It has no dependencies of its own with default features off.
+t4a-cuda-kernels = { version = "0.4.0", default-features = false }
+thiserror = "2"
+
+[[test]]
+name = "add_f32"
+path = "tests/add_f32.rs"
+
+[[example]]
+name = "add_f32"
+path = "examples/add_f32.rs"

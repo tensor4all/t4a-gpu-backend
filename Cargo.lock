@@ -122,10 +122,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "t4a-cuda-kernels"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "652fe0da94de880fa6db2894ef38e388cb3b187a0a97a7456edb8734051c7b8d"
+
+[[package]]
 name = "t4a-cuda-runtime"
 version = "0.1.1"
 dependencies = [
  "cudarc",
+ "thiserror",
+]
+
+[[package]]
+name = "t4a-hip-kernels"
+version = "0.1.0"
+dependencies = [
+ "t4a-cuda-kernels",
+ "t4a-hip-runtime",
+ "t4a-hip-sys",
  "thiserror",
 ]
 

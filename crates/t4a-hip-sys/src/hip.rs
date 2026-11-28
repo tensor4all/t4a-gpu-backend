@@ -12,6 +12,11 @@ use std::sync::OnceLock;
 use crate::error::Result;
 use crate::loader::{ensure_single_hip_runtime, hip_candidates, GfxOverride, Library};
 
+/// `hipModule_t`: a code object loaded into the current context.
+pub type HipModule = *mut c_void;
+/// `hipFunction_t`: one kernel of a [`HipModule`].
+pub type HipFunction = *mut c_void;
+
 /// `hipError_t`.
 pub type HipError = i32;
 /// `hipStream_t`.
@@ -234,7 +239,27 @@ pub struct HipTable {
     pub pointer_get_attributes:
         unsafe extern "C" fn(*mut PointerAttributes, *const c_void) -> HipError,
     pub get_last_error: unsafe extern "C" fn() -> HipError,
+    pub module_load_data: unsafe extern "C" fn(*mut HipModule, *const c_void) -> HipError,
+    pub module_unload: unsafe extern "C" fn(HipModule) -> HipError,
+    pub module_get_function:
+        unsafe extern "C" fn(*mut HipFunction, HipModule, *const c_char) -> HipError,
+    pub module_launch_kernel: ModuleLaunchKernelFn,
 }
+
+/// `hipModuleLaunchKernel(f, gx, gy, gz, bx, by, bz, sharedBytes, stream, params, extra)`.
+pub type ModuleLaunchKernelFn = unsafe extern "C" fn(
+    HipFunction,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    HipStream,
+    *mut *mut c_void,
+    *mut *mut c_void,
+) -> HipError;
 
 static HIP: OnceLock<Result<HipTable>> = OnceLock::new();
 
@@ -287,6 +312,10 @@ impl HipTable {
                     memset_async: library.function(b"hipMemsetAsync\0")?,
                     pointer_get_attributes: library.function(b"hipPointerGetAttributes\0")?,
                     get_last_error: library.function(b"hipGetLastError\0")?,
+                    module_load_data: library.function(b"hipModuleLoadData\0")?,
+                    module_unload: library.function(b"hipModuleUnload\0")?,
+                    module_get_function: library.function(b"hipModuleGetFunction\0")?,
+                    module_launch_kernel: library.function(b"hipModuleLaunchKernel\0")?,
                     library,
                     gfx_override,
                 })

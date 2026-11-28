@@ -49,13 +49,16 @@
 
 mod error;
 mod hip;
+mod hiprtc;
 mod loader;
 mod rocblas;
 
 pub use error::{Error, Result};
 pub use hip::*;
+pub use hiprtc::*;
 pub use loader::{
     ensure_single_hip_runtime, hip_candidates, hip_runtimes_in_maps, mapped_hip_runtimes,
-    sibling_candidates, GfxOverride, HIP_SONAMES, ROCBLAS_SONAMES, ROCSOLVER_SONAMES,
+    sibling_candidates, GfxOverride, HIPRTC_SONAMES, HIP_SONAMES, ROCBLAS_SONAMES,
+    ROCSOLVER_SONAMES,
 };
 pub use rocblas::*;
